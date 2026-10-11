@@ -30,4 +30,4 @@ DO_NOT_TRACK=1 npm exec vitest run tests/setup-telemetry.test.ts tests/dot-agent
 npm run typecheck
 ```
 
-Production delivery and PostHog attribution are separate from these local checks; see [TELEMETRY.md](TELEMETRY.md) for live validation and reporting.
+Production delivery and PostHog attribution are separate from these local checks; see [the upstream telemetry runbook](https://github.com/CopilotKit/OpenDots/blob/main/docs/TELEMETRY.md) for CopilotKit's live validation and reporting.
