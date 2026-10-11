@@ -27,15 +27,15 @@ ThinnSpace runs on your own infrastructure. It has three ideas:
 
 A flow is a team. Nodes are the things your Dots already do, so there is no model, prompt, or parser plumbing on the canvas.
 
-| Category | Nodes |
-| --- | --- |
+| Category       | Nodes                                                         |
+| -------------- | ------------------------------------------------------------- |
 | Start & finish | Start (manual, schedule, Slack, webhook, page change), Finish |
-| Dots | Dot task, Dot decides |
-| Pages | Read page, Save page |
-| Actions | Web research, Connected app, Send message |
-| Logic | Branch, Combine |
-| People | Human review |
-| Notes | Note |
+| Dots           | Dot task, Dot decides                                         |
+| Pages          | Read page, Save page                                          |
+| Actions        | Web research, Connected app, Send message                     |
+| Logic          | Branch, Combine                                               |
+| People         | Human review                                                  |
+| Notes          | Note                                                          |
 
 Dot team, For each, Run flow, Computer task, and Wait appear in the palette as coming soon.
 

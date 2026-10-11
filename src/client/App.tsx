@@ -10,6 +10,7 @@ import {
   Clock3,
   Code2,
   Folder,
+  Inbox,
   Menu,
   MessageCircle,
   Monitor,
@@ -32,6 +33,7 @@ import type {
   State,
   WorkspaceState,
 } from '../shared/types';
+import type { FlowRunSummary } from '../shared/flow-runs';
 import { api, ApiError, authHeaders, setToken } from './api';
 import { trackSetupStep } from './setup-telemetry';
 import {
@@ -53,6 +55,11 @@ import { submitComposerOnEnter } from './chat-composer';
 import { FlowEditor } from './flows/FlowEditor';
 import { FlowsHome, flowStatusLabel, flowTrigger } from './flows/FlowsHome';
 import { FLOWS_ROUTE, flowRoute } from './flows/contract';
+import {
+  FlowRunsActivity,
+  REVIEWS_ROUTE,
+  ReviewsInbox,
+} from './flows/ReviewsInbox';
 import './flows/flow-home.css';
 
 function describeFailure(error: unknown, fallback: string) {
@@ -69,7 +76,7 @@ export function App() {
   const [selectedDot, setSelectedDot] = useState('');
   const [selectedThread, setSelectedThread] = useState<string>();
   const [view, rawSetView] = useState<
-    'chat' | 'tasks' | 'memories' | 'space' | 'flows' | 'flow'
+    'chat' | 'tasks' | 'memories' | 'space' | 'flows' | 'flow' | 'reviews'
   >('chat');
   const dirtyPage = useRef(false);
   const [spaceId, setSpaceId] = useState('');
@@ -87,7 +94,12 @@ export function App() {
     )
       return;
     dirtyPage.current = false;
-    if (next !== 'space' && next !== 'flows' && next !== 'flow')
+    if (
+      next !== 'space' &&
+      next !== 'flows' &&
+      next !== 'flow' &&
+      next !== 'reviews'
+    )
       history.replaceState(null, '', location.pathname + location.search);
     rawSetView(next);
   };
@@ -97,8 +109,11 @@ export function App() {
       const space = location.hash.match(
         /^#\/spaces\/([^/]+)(?:\/pages\/([^/]+))?$/,
       );
-      const flow = location.hash.match(/^#\/flows(?:\/([^/]+))?$/);
-      if (!space && !flow) return;
+      const flow = location.hash.match(
+        /^#\/flows(?:\/([^/?]+))?(?:\?run=[^/?&]+)?$/,
+      );
+      const reviews = location.hash === REVIEWS_ROUTE;
+      if (!space && !flow && !reviews) return;
       if (dirtyPage.current && location.hash === acceptedHash) return;
       if (
         dirtyPage.current &&
@@ -116,6 +131,8 @@ export function App() {
       } else if (flow) {
         setFlowId(flow[1]);
         rawSetView(flow[1] ? 'flow' : 'flows');
+      } else {
+        rawSetView('reviews');
       }
       setMobile(false);
     };
@@ -127,7 +144,15 @@ export function App() {
     openPageLink(`#/spaces/${space}${page ? `/pages/${page}` : ''}`);
   };
   const openFlows = () => openPageLink(FLOWS_ROUTE);
-  const openFlow = (id: string) => openPageLink(flowRoute(id));
+  const openReviews = () => openPageLink(REVIEWS_ROUTE);
+  // `?run=` opens the flow with that run loaded in its Runs tray, so a row
+  // clicked in the Reviews inbox or the activity list stays identified.
+  const openFlow = (id: string, runId?: string) =>
+    openPageLink(
+      runId
+        ? `${flowRoute(id)}?run=${encodeURIComponent(runId)}`
+        : flowRoute(id),
+    );
   const createFlow = () => {
     openFlows();
     setCreateFlowRequested((count) => count + 1);
@@ -145,6 +170,10 @@ export function App() {
     );
   const [auth, setAuth] = useState('');
   const [needsAuth, setNeedsAuth] = useState(false);
+  // True only once a request has actually succeeded. `needsAuth` starts
+  // false, so the flow polls below would otherwise fire one 401 each on a
+  // cold load with an owner token configured and no stored session token.
+  const [signedIn, setSignedIn] = useState(false);
   const [dialog, setDialog] = useState<Dialog>();
   const [mobile, setMobile] = useState(false);
   const [navCollapsed, setNavCollapsed] = useState(false);
@@ -164,10 +193,14 @@ export function App() {
       setState(s);
       setWorkspace(w);
       setNeedsAuth(false);
+      setSignedIn(true);
       setSelectedDot((previous) => previous || w.dots[0]?.id || '');
       setNotices((current) => applyRefreshResult(current, { ok: true }));
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) setNeedsAuth(true);
+      if (e instanceof ApiError && e.status === 401) {
+        setNeedsAuth(true);
+        setSignedIn(false);
+      }
       setNotices((current) =>
         applyRefreshResult(
           current,
@@ -208,6 +241,51 @@ export function App() {
       clearInterval(timer);
     };
   }, [selectedThread]);
+  // Pending reviews drive the sidebar badge, as a count rather than the
+  // list: every pending row carries its draft. A failure here is already
+  // reported by the workspace refresh above. Both of the flow polls below
+  // wait for `signedIn`, so neither runs while the unlock screen is up.
+  const [pendingReviews, setPendingReviews] = useState(0);
+  const loadReviews = useCallback(() => {
+    if (!signedIn) return;
+    void api<{ pending: number }>('/flows/approvals/count')
+      .then(({ pending }) => setPendingReviews(pending))
+      .catch(() => undefined);
+  }, [signedIn]);
+  useEffect(() => {
+    if (!signedIn) {
+      setPendingReviews(0);
+      return;
+    }
+    // The inbox owns the number while it is open: it already polls the
+    // pending list every 10 s and reports its own count.
+    if (view === 'reviews') return;
+    loadReviews();
+    const timer = setInterval(loadReviews, 20_000);
+    return () => clearInterval(timer);
+  }, [loadReviews, signedIn, view]);
+  // Recent runs across every flow, for the "Flow runs" activity section.
+  const [flowRuns, setFlowRuns] = useState<FlowRunSummary[]>([]);
+  const [flowRunsLoaded, setFlowRunsLoaded] = useState(false);
+  useEffect(() => {
+    if (view !== 'tasks' || !signedIn) return;
+    let active = true;
+    const load = () =>
+      void api<FlowRunSummary[]>('/flows/runs?limit=20')
+        .then((list) => {
+          if (active) setFlowRuns(list);
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (active) setFlowRunsLoaded(true);
+        });
+    load();
+    const timer = setInterval(load, 10_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [view, signedIn]);
   const mutate = async (path: string, method: string, body?: unknown) => {
     setError('');
     try {
@@ -507,6 +585,15 @@ export function App() {
               <small>{workspace.flows.length}</small>
             )}
           </button>
+          <button
+            className={`nav-item ${view === 'reviews' ? 'active' : ''}`}
+            aria-current={view === 'reviews' ? 'page' : undefined}
+            onClick={openReviews}
+          >
+            <Inbox size={16} />
+            <span>Reviews</span>
+            {pendingReviews > 0 && <small>{pendingReviews}</small>}
+          </button>
           {workspace.flows.map((flow) => {
             const trigger = flowTrigger(flow.trigger);
             const Trigger = trigger.icon;
@@ -617,7 +704,7 @@ export function App() {
             <span>
               {view === 'space'
                 ? workspace.spaces.find((space) => space.id === spaceId)?.name
-                : view === 'flows' || view === 'flow'
+                : view === 'flows' || view === 'flow' || view === 'reviews'
                   ? 'Flows'
                   : 'Dots'}
             </span>
@@ -631,10 +718,12 @@ export function App() {
                     ? 'Pages'
                     : view === 'flows'
                       ? 'All flows'
-                      : view === 'flow'
-                        ? (workspace.flows.find((flow) => flow.id === flowId)
-                            ?.name ?? 'Flow')
-                        : 'Memories'}
+                      : view === 'reviews'
+                        ? 'Reviews'
+                        : view === 'flow'
+                          ? (workspace.flows.find((flow) => flow.id === flowId)
+                              ?.name ?? 'Flow')
+                          : 'Memories'}
             </strong>
           </div>
           <div className="top-actions">
@@ -724,6 +813,8 @@ export function App() {
               });
             }}
           />
+        ) : view === 'reviews' ? (
+          <ReviewsInbox onOpenFlow={openFlow} onCount={setPendingReviews} />
         ) : view === 'flows' || view === 'flow' ? (
           <FlowsHome
             flows={workspace.flows}
@@ -994,6 +1085,11 @@ export function App() {
                     </p>
                   </div>
                 )}
+                <FlowRunsActivity
+                  runs={flowRuns}
+                  loaded={flowRunsLoaded}
+                  onOpen={openFlow}
+                />
                 {taskDetail && (
                   <section className="task-detail-card">
                     <h2>{taskDetail.task.prompt}</h2>

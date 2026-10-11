@@ -7,9 +7,15 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import type { Platform } from './platform.js';
 import { lintFlow, type FlowGraph } from '../shared/flows.js';
-import type { ApprovalAction } from '../shared/flow-runs.js';
+import {
+  WEBHOOK_TOKEN_HEADER,
+  type ApprovalAction,
+} from '../shared/flow-runs.js';
 
 const ACTIONS: readonly ApprovalAction[] = ['approve', 'changes', 'decline'];
+
+/** Where a webhook with its security set to None is still callable. */
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 
 /** The Start node a manual run fires: the first manual Start, else the first Start. */
 export function manualStart(graph: FlowGraph) {
@@ -33,6 +39,12 @@ export function flowRunRoutes(platform: Platform) {
   // Fixed paths come before the parameterised ones so "runs" and
   // "approvals" are never read as flow ids.
   app.get('/flows/approvals', (c) => c.json(runs.pendingApprovals()));
+  // The sidebar badge wants a number, not the review corpus: every pending
+  // row carries its draft, so counting them client-side costs the whole
+  // table on a 20-second poll.
+  app.get('/flows/approvals/count', (c) =>
+    c.json({ pending: runs.pendingApprovalCount() }),
+  );
   app.post('/flows/approvals/:id/decide', async (c) => {
     const data = z
       .object({
@@ -80,6 +92,16 @@ export function flowRunRoutes(platform: Platform) {
         409,
       );
     }
+  });
+  // "runs" with no flow id is the cross-flow activity list; it stays above
+  // /flows/:id/runs so "runs" is never read as a flow id.
+  app.get('/flows/runs', (c) => {
+    const asked = Number(c.req.query('limit'));
+    return c.json(
+      runs.recentRuns(
+        Number.isFinite(asked) && asked > 0 ? Math.trunc(asked) : 20,
+      ),
+    );
   });
   app.get('/flows/runs/:runId', (c) => {
     const run = runs.get(c.req.param('runId'));
@@ -142,8 +164,22 @@ export function flowRunRoutes(platform: Platform) {
       return c.json({ error: 'This webhook is paused.' }, 409);
     if (trigger.config.webhookAuth !== 'none') {
       const token = runs.webhookToken(flow.id);
-      if (!token || c.req.header('X-Flow-Token') !== token)
-        return c.json({ error: 'Invalid or missing X-Flow-Token.' }, 401);
+      if (!token || c.req.header(WEBHOOK_TOKEN_HEADER) !== token)
+        return c.json(
+          { error: `Invalid or missing ${WEBHOOK_TOKEN_HEADER}.` },
+          401,
+        );
+    } else if (!LOOPBACK_HOSTS.has(new URL(c.req.url).hostname)) {
+      // This path is exempt from the owner-token check (src/server/app.ts),
+      // so the flow token is the hook's only credential. With security set
+      // to None there is none, which is fine on a dev machine and not fine
+      // on an address someone else can reach.
+      return c.json(
+        {
+          error: `This webhook has no token, so it is only callable on this machine. Set its security to a ${WEBHOOK_TOKEN_HEADER} token and publish again.`,
+        },
+        401,
+      );
     }
     const body: unknown = await c.req.json().catch(() => null);
     const fields =

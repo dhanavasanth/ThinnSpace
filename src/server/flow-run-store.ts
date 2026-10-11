@@ -52,7 +52,16 @@ type StepRow = Omit<FlowRunStep, 'input' | 'output'> & {
   input: string | null;
   output: string | null;
 };
-type ApprovalRow = Omit<FlowApproval, 'payload'> & { payload: string };
+type ApprovalRow = Omit<FlowApproval, 'payload' | 'context'> & {
+  payload: string;
+};
+/** The joined columns pendingApprovals() reads for the inbox context. */
+interface InboxColumns {
+  ctxFlowName: string | null;
+  ctxNodeLabel: string | null;
+  ctxStartedAt: number | null;
+  ctxTrigger: string | null;
+}
 type TriggerDbRow = Omit<TriggerRow, 'config' | 'active'> & {
   config: string;
   active: number;
@@ -237,15 +246,47 @@ export class FlowRunStore {
     const row = this.row(runId);
     return row ? this.record(row) : undefined;
   }
+  /**
+   * One statement per run list: the summary columns only (no graph, no
+   * result) with both step counters computed in the same query. The lists
+   * are polled every few seconds, and `record()` would otherwise parse every
+   * run's whole graph snapshot and run a second statement per row only for
+   * `summaryOf` to throw the graph away.
+   */
+  private summaries(where: string, params: unknown[]): FlowRunSummary[] {
+    const rows = this.db
+      .prepare(
+        `SELECT r.id, r.flowId, r.flowName, r.versionId, r.status, r.trigger, r.error,
+            r.waitingNodeId, r.startedAt, r.finishedAt,
+            COUNT(DISTINCT s.nodeId) AS total,
+            COUNT(DISTINCT CASE WHEN s.status='completed' THEN s.nodeId END) AS done
+         FROM flow_runs r
+         LEFT JOIN flow_run_steps s ON s.runId=r.id AND s.iterationKey=''
+         ${where}
+         GROUP BY r.id ORDER BY r.startedAt DESC LIMIT ?`,
+      )
+      .all(...(params as never[])) as unknown as (Omit<
+      FlowRunSummary,
+      'trigger' | 'stepCount' | 'completedSteps'
+    > & { trigger: string; total: number; done: number | null })[];
+    return rows.map(({ total, done, ...row }) => ({
+      ...row,
+      trigger: JSON.parse(row.trigger) as RunTrigger,
+      stepCount: total,
+      completedSteps: done ?? 0,
+    }));
+  }
   /** Runs of a flow, newest first. */
   list(flowId: string): FlowRunSummary[] {
-    return (
-      this.db
-        .prepare(
-          'SELECT * FROM flow_runs WHERE flowId=? ORDER BY startedAt DESC LIMIT ?',
-        )
-        .all(flowId, RUN_LIMITS.runsPerFlow) as unknown as RunRow[]
-    ).map((row) => summaryOf(this.record(row)));
+    return this.summaries('WHERE r.flowId=?', [flowId, RUN_LIMITS.runsPerFlow]);
+  }
+  /**
+   * The most recent runs across every flow, newest first. `limit` is clamped
+   * to 1-100 so the activity list can never ask for the whole table.
+   */
+  recentRuns(limit = 20): FlowRunSummary[] {
+    const take = Math.min(100, Math.max(1, Math.trunc(limit) || 20));
+    return this.summaries('', [take]);
   }
   /** Runs that still need the engine or a person. */
   active(): RunRecord[] {
@@ -442,14 +483,50 @@ export class FlowRunStore {
       .get(id) as ApprovalRow | undefined;
     return row ? hydrateApproval(row) : undefined;
   }
+  /**
+   * Pending reviews across every flow, newest first, each carrying the
+   * `context` the Reviews inbox renders (flow name, the waiting step's label,
+   * when the run started, what triggered it) so the inbox needs no second
+   * request per card. A run purged under the per-flow cap takes its approvals
+   * with it, so the join is only defensive.
+   *
+   * Capped at `RUN_LIMITS.approvals`: every row carries its draft, so one
+   * request can never return the whole table. The sidebar badge asks
+   * `pendingApprovalCount()` rather than counting this list.
+   */
   pendingApprovals(): FlowApproval[] {
-    return (
-      this.db
-        .prepare(
-          "SELECT * FROM flow_approvals WHERE status='pending' ORDER BY createdAt DESC",
-        )
-        .all() as unknown as ApprovalRow[]
-    ).map(hydrateApproval);
+    const rows = this.db
+      .prepare(
+        `SELECT a.*, r.flowName AS ctxFlowName, r.startedAt AS ctxStartedAt, r.trigger AS ctxTrigger,
+            (SELECT label FROM flow_run_steps s WHERE s.runId=a.runId AND s.nodeId=a.nodeId ORDER BY attempt DESC LIMIT 1) AS ctxNodeLabel
+         FROM flow_approvals a LEFT JOIN flow_runs r ON r.id=a.runId
+         WHERE a.status='pending' ORDER BY a.createdAt DESC LIMIT ?`,
+      )
+      .all(RUN_LIMITS.approvals) as unknown as (ApprovalRow & InboxColumns)[];
+    return rows.map(
+      ({ ctxFlowName, ctxNodeLabel, ctxStartedAt, ctxTrigger, ...row }) => ({
+        ...hydrateApproval(row),
+        context: {
+          flowName: ctxFlowName ?? '',
+          nodeLabel: ctxNodeLabel ?? row.title,
+          runStartedAt: ctxStartedAt ?? row.createdAt,
+          trigger: parse<RunTrigger>(ctxTrigger)?.source ?? 'manual',
+        },
+      }),
+    );
+  }
+  /**
+   * How many reviews are pending across every flow. The sidebar badge polls
+   * this instead of `pendingApprovals()`, which would ship every draft to
+   * render one number.
+   */
+  pendingApprovalCount(): number {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS pending FROM flow_approvals WHERE status='pending'",
+      )
+      .get() as { pending: number };
+    return row.pending;
   }
   /** Records a decision; false when the approval was already decided. */
   decideApproval(
@@ -539,6 +616,10 @@ export class FlowRunStore {
   ensureWebhookToken(flowId: string): string {
     const current = this.webhookToken(flowId);
     if (current) return current;
+    return this.resetWebhookToken(flowId);
+  }
+  /** Mints a new token, retiring the previous one and its callers. */
+  resetWebhookToken(flowId: string): string {
     const token = randomUUID().replace(/-/g, '');
     this.db
       .prepare('UPDATE flows SET webhookToken=? WHERE id=?')

@@ -27,6 +27,11 @@ export type ConfigControl =
 export interface ConfigOption {
   value: string;
   label: string;
+  /**
+   * Declared but not wired up yet: the option stays selectable so existing
+   * flows keep their value, the linter warns, and the engine refuses it.
+   */
+  unavailable?: boolean;
 }
 export interface ConfigField {
   key: string;
@@ -666,10 +671,14 @@ export const NODE_CATALOG: NodeCategory[] = [
             default: 'inbox',
             options: [
               { value: 'inbox', label: 'Run log' },
-              { value: 'slack', label: 'Slack channel' },
+              // Proactive Slack posts need an API the Channels SDK does not
+              // expose yet; both are declared so the flow keeps the choice,
+              // and lintFlow warns before the run rather than during it.
+              { value: 'slack', label: 'Slack channel', unavailable: true },
               {
                 value: 'thread',
                 label: 'The Slack thread that started this flow',
+                unavailable: true,
               },
             ],
           },
@@ -1109,6 +1118,16 @@ export function nodeFields(type: string): ConfigField[] {
   if (spec.decorative || spec.type === 'start') return spec.config;
   return [...spec.config, ...COMMON_SETTINGS];
 }
+/**
+ * True when the value chosen for a select is one the catalog declares but
+ * cannot carry out yet (see ConfigOption.unavailable).
+ */
+export function optionUnavailable(type: string, key: string, value: unknown) {
+  return !!nodeFields(type)
+    .find((field) => field.key === key)
+    ?.options?.find((option) => option.value === String(value ?? ''))
+    ?.unavailable;
+}
 export function nodeCategory(type: string): NodeCategory | undefined {
   return NODE_CATALOG.find((category) =>
     category.nodes.some((node) => node.type === type),
@@ -1341,15 +1360,20 @@ export function lintFlow(
       });
     finishLabels.set(label, node);
   }
+  // The same shape the engine resolves (TOKEN_PATTERN in flow-runner.ts),
+  // including the `{{slug.port.key}}` form that indexes into a json value —
+  // a stale one of those must be reported, not quietly rendered as ''.
   const tokensOf = (config: Record<string, unknown>) =>
     Object.values(config).flatMap((value) =>
       typeof value === 'string'
-        ? [...value.matchAll(/\{\{\s*([\w-]+)\.([\w:-]+)\s*\}\}/g)].map(
-            (m) => ({
-              node: m[1],
-              port: m[2],
-            }),
-          )
+        ? [
+            ...value.matchAll(
+              /\{\{\s*([\w-]+)\.([\w:-]+)(?:\.[\w-]+)*\s*\}\}/g,
+            ),
+          ].map((m) => ({
+            node: m[1],
+            port: m[2],
+          }))
         : [],
     );
   for (const node of graph.nodes) {
@@ -1411,17 +1435,22 @@ export function lintFlow(
         message: `${name} is not available yet.`,
         nodeId: node.id,
       });
+    // Design-time honesty: the catalog marks the Slack destinations
+    // unavailable, so a flow that picks one hears about it while it is being
+    // drawn instead of mid-run. A warning, never a blocker: a draft that
+    // wants Slack is still worth saving.
     if (
-      (node.type === 'send-message' && config.destination !== 'inbox') ||
+      (node.type === 'send-message' &&
+        optionUnavailable(node.type, 'destination', config.destination)) ||
       (node.type === 'human-review' && config.notify !== 'app')
     )
       problems.push({
         level: 'warning',
         code: 'slack-proactive-unavailable',
-        message: `${name}: Slack delivery is not available yet; the step ${
+        message: `${name}: Slack delivery is not available yet; ${
           node.type === 'send-message'
-            ? 'will fail'
-            : 'notifies in the app only'
+            ? 'this step will fail'
+            : 'this step notifies in the app only'
         }.`,
         nodeId: node.id,
       });
@@ -1552,6 +1581,94 @@ export function tokenSlug(node: Pick<FlowNode, 'type' | 'label'>) {
       .replace(/[^a-z0-9]+/g, '_')
       .replace(/^_+|_+$/g, '') || node.type
   );
+}
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+/** Every node reachable by following edges forward out of `nodeId`. */
+function downstreamIds(graph: FlowGraph, nodeId: string) {
+  const children = new Map<string, string[]>();
+  for (const edge of graph.edges) {
+    const list = children.get(edge.source) ?? [];
+    list.push(edge.target);
+    children.set(edge.source, list);
+  }
+  const seen = new Set<string>();
+  const queue = [...(children.get(nodeId) ?? [])];
+  while (queue.length) {
+    const current = queue.shift()!;
+    if (current === nodeId || seen.has(current)) continue;
+    seen.add(current);
+    queue.push(...(children.get(current) ?? []));
+  }
+  return seen;
+}
+/**
+ * Repair `{{slug.port}}` references after a node is renamed. Chips are written
+ * against the slug derived from a node's label, so without this a rename
+ * leaves every downstream reference pointing at a name that no longer exists
+ * (the linter reports those as `unknown-token`).
+ *
+ * Returns a new graph whose downstream nodes have `{{oldSlug.<port>}}` (and
+ * the `{{oldSlug.<port>.<key>}}` indexing form) rewritten to the new slug in
+ * their string config values; applying the new label itself is the caller's
+ * job. The graph comes back untouched when the slug does not actually change,
+ * when nothing downstream mentions it, or when either slug is ambiguous:
+ *
+ * - the new slug already belongs to another node, so rewriting would point
+ *   two cards at one token;
+ * - another node still answers to the old slug, which is the default state
+ *   for two cards of the same type (`upstreamRefs` disambiguates them
+ *   positionally as `slug` and `slug_2`), so rewriting would silently point
+ *   a chip that reads the *other* card at this one.
+ *
+ * In both cases the references are left for the linter to report rather than
+ * repaired into a different meaning.
+ */
+export function renameToken(
+  graph: FlowGraph,
+  nodeId: string,
+  oldLabel: string | undefined,
+  newLabel: string | undefined,
+): FlowGraph {
+  const node = graph.nodes.find((candidate) => candidate.id === nodeId);
+  if (!node) return graph;
+  const oldSlug = tokenSlug({ type: node.type, label: oldLabel });
+  const newSlug = tokenSlug({ type: node.type, label: newLabel });
+  if (oldSlug === newSlug) return graph;
+  const ambiguous = (slug: string) =>
+    graph.nodes.some(
+      (candidate) => candidate.id !== nodeId && tokenSlug(candidate) === slug,
+    );
+  if (ambiguous(newSlug) || ambiguous(oldSlug)) return graph;
+  const downstream = downstreamIds(graph, nodeId);
+  if (!downstream.size) return graph;
+  // Same shape the linter scans for and the engine resolves, so a repaired
+  // reference always matches the chip the linter would otherwise flag; the
+  // third group carries the `.key` path of an indexed chip through.
+  const pattern = new RegExp(
+    `\\{\\{(\\s*)${escapeRegExp(oldSlug)}\\.([\\w:-]+)((?:\\.[\\w-]+)*)(\\s*)\\}\\}`,
+    'g',
+  );
+  let changed = false;
+  const nodes = graph.nodes.map((candidate) => {
+    if (!downstream.has(candidate.id)) return candidate;
+    let touched = false;
+    const config: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(candidate.config)) {
+      if (typeof value !== 'string') {
+        config[key] = value;
+        continue;
+      }
+      const next = value.replace(pattern, `{{$1${newSlug}.$2$3$4}}`);
+      if (next !== value) touched = true;
+      config[key] = next;
+    }
+    if (!touched) return candidate;
+    changed = true;
+    return { ...candidate, config };
+  });
+  return changed ? { ...graph, nodes } : graph;
 }
 /** Every output reachable upstream of `nodeId`, nearest ancestors first. */
 export function upstreamRefs(graph: FlowGraph, nodeId: string): UpstreamRef[] {

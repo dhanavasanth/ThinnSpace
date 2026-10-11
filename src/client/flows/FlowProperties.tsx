@@ -78,6 +78,7 @@ function useClickOutside(
 }
 
 export function FlowProperties({
+  flow,
   node,
   graph,
   workspace,
@@ -187,6 +188,7 @@ export function FlowProperties({
           field={field}
           node={node}
           config={merged}
+          flowId={flow.id}
           workspace={workspace}
           upstream={upstream}
           invalid={Boolean(problem)}

@@ -346,6 +346,18 @@
   display: flex;
   flex-direction: column;
 }
+/* Wrapper around the bottom tray (runs or problems). It is transparent to
+   layout, so the tray itself stays the flex child of .flow-center; below
+   900px the editor sets `hidden` on it while the properties sheet is open,
+   which keeps the tray mounted (and its half-typed notes) without drawing
+   it. The explicit [hidden] rule is needed because `display: contents`
+   would otherwise beat the browser's own `[hidden]` style. */
+.flow-tray-slot {
+  display: contents;
+}
+.flow-tray-slot[hidden] {
+  display: none;
+}
 .flow-canvas {
   flex: 1;
   min-height: 0;
@@ -1078,22 +1090,92 @@
     animation: none !important;
   }
 }
-/* Narrow screens: the right slot (step picker or properties) floats over
-   the canvas so the canvas keeps its width. */
+/* ---------- narrow screens ---------- */
+/* Below 900px (NARROW_MAX in flow-history.ts, which the editor reads to turn
+   off node dragging and drop the minimap) the editor becomes a one-column
+   tool: the right slot is a bottom sheet, the header keeps only back, name,
+   problems, Publish and the "..." menu, and the canvas keeps the room above
+   the sheet so the Run bar and the zoom controls stay reachable. */
 @media (max-width: 900px) {
-  .flow-properties-slot {
-    position: absolute;
-    right: 0;
-    top: 0;
-    bottom: 0;
-    width: min(360px, 90vw) !important;
-    z-index: 20;
-    box-shadow: -8px 0 24px #1f232914;
+  .flow-editor {
+    --flow-sheet-h: min(48vh, 360px);
   }
-  .flow-panel-grip {
+  .flow-header {
+    gap: 6px;
+    padding: 0 8px 0 4px;
+  }
+  .flow-name {
+    max-width: 34vw;
+  }
+  .flow-name-input {
+    width: 40vw;
+    min-width: 140px;
+  }
+  /* Secondary header actions: undo/redo, Validate, Preview run order,
+     keyboard shortcuts and the publish-status chip. Preview and Validate move
+     to the zoom controls (see the ControlButtons in FlowEditor.tsx). */
+  .flow-header-group,
+  .flow-header-divider,
+  .flow-status-chip,
+  .flow-preview-button,
+  .flow-validate-button,
+  .flow-shortcuts-button {
+    display: none;
+  }
+  /* The save chip keeps its state but drops the ticking "2m ago". */
+  .flow-save-when {
     display: none;
   }
   .flow-body {
     position: relative;
+  }
+  /* The slot (step picker or properties panel) becomes a bottom sheet. Its
+     width is set inline on desktop, hence the !important. */
+  .flow-properties-slot {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    width: auto !important;
+    height: var(--flow-sheet-h);
+    z-index: 20;
+    background: #fff;
+    border-top: 1px solid var(--flow-line);
+    box-shadow: 0 -10px 28px #1f232914;
+  }
+  /* Both panels draw a left border for the docked layout; a sheet has none. */
+  .flow-properties-slot > .flow-node-panel,
+  .flow-properties-slot > .flow-properties {
+    border-left: 0;
+  }
+  .flow-panel-grip {
+    display: none;
+  }
+  /* Give the canvas back the height the sheet takes, so the bottom-centre Run
+     bar and the bottom-left controls sit above it rather than behind it. */
+  .flow-body.with-slot .flow-center {
+    padding-bottom: var(--flow-sheet-h);
+  }
+  /* The editor stops rendering the minimap here; this is the belt for a
+     viewport that changed before the resize listener landed. */
+  .flow-editor .react-flow__minimap {
+    display: none;
+  }
+  .flow-editor .react-flow__controls,
+  .flow-editor .react-flow__panel.top.right {
+    margin: 10px;
+  }
+  .flow-editor .react-flow__panel.bottom.center {
+    margin: 12px;
+  }
+  .flow-add-fab {
+    width: 44px;
+    height: 44px;
+  }
+  /* The trays are the full width here and never share the screen with the
+     sheet (the editor renders one or the other). */
+  .flow-problems {
+    max-height: 40vh;
   }
 }

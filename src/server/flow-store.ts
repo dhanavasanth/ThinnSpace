@@ -36,13 +36,22 @@ export class FlowStore {
         db.exec(`ALTER TABLE flows ADD COLUMN ${column} ${definition}`);
     }
   }
+  /**
+   * The columns a `Flow` is made of, named explicitly: the table also holds
+   * the webhook token (added by FlowRunStore), and `SELECT *` plus a spread
+   * would ride that secret along in every flow response.
+   */
+  private static COLUMNS =
+    'id, name, description, graph, revision, publishedVersionId, publishedRevision, createdAt, updatedAt';
   private hydrate(row: Row): Flow {
     return { ...row, graph: JSON.parse(row.graph) as FlowGraph };
   }
   list(): FlowSummary[] {
     return (
       this.db
-        .prepare('SELECT * FROM flows ORDER BY updatedAt DESC')
+        .prepare(
+          `SELECT ${FlowStore.COLUMNS} FROM flows ORDER BY updatedAt DESC`,
+        )
         .all() as unknown as Row[]
     ).map((row) => {
       const graph = JSON.parse(row.graph) as FlowGraph;
@@ -58,8 +67,9 @@ export class FlowStore {
     });
   }
   get(id: string): Flow | undefined {
-    const row = this.db.prepare('SELECT * FROM flows WHERE id=?').get(id) as
-      Row | undefined;
+    const row = this.db
+      .prepare(`SELECT ${FlowStore.COLUMNS} FROM flows WHERE id=?`)
+      .get(id) as Row | undefined;
     return row ? this.hydrate(row) : undefined;
   }
   create(name: string, description: string, graph: FlowGraph): Flow {

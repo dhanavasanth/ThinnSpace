@@ -22,6 +22,7 @@ import {
   nodeInputs,
   nodeLabel,
   nodeOutputs,
+  renameToken,
   type Flow,
   type FlowEdge,
   type FlowGraph,
@@ -234,6 +235,41 @@ export function structuralKey(snapshot: Snapshot) {
   });
 }
 
+/**
+ * Apply a patch to one card and, when the patch renames it, repair the chips
+ * that referred to it by its old name. Both land in the same canvas edit, so
+ * one undo takes the rename and the repaired references back together.
+ */
+export function applyNodePatch(
+  nodes: EditorNode[],
+  edges: EditorEdge[],
+  id: string,
+  patch: Partial<FlowNode>,
+  workspace: WorkspaceState,
+): EditorNode[] {
+  const before = nodes.find((node) => node.id === id);
+  if (!before) return nodes;
+  const patched = nodes.map((node) =>
+    node.id === id ? patchEditorNode(node, patch, workspace) : node,
+  );
+  if (!('label' in patch)) return patched;
+  const oldLabel = before.data.node.label;
+  const newLabel = patch.label;
+  if ((oldLabel ?? '') === (newLabel ?? '')) return patched;
+  const graph = toGraph(serializeCanvas(patched, edges));
+  const repaired = renameToken(graph, id, oldLabel, newLabel);
+  if (repaired === graph) return patched;
+  // serializeCanvas carries each config object by reference, so only the
+  // nodes renameToken actually rewrote come back with a new one.
+  const rewritten = new Map(repaired.nodes.map((node) => [node.id, node]));
+  return patched.map((node) => {
+    const next = rewritten.get(node.id);
+    return next && next.config !== node.data.node.config
+      ? patchEditorNode(node, { config: next.config }, workspace)
+      : node;
+  });
+}
+
 /** Copy nodes and the edges between them with fresh ids, shifted by `offset`. */
 export function cloneSubgraph(
   nodes: FlowNode[],
@@ -404,6 +440,46 @@ export function edgeFrom(
     targetHandle: inp.id,
     type: 'flow',
   };
+}
+
+/* ---------- narrow screens ---------- */
+
+/**
+ * The breakpoint the editor's small-screen mode uses. It must stay in step
+ * with the `@media (max-width: 900px)` block in flow-editor.css: below it the
+ * right slot is a bottom sheet, the minimap goes, and node dragging is turned
+ * off so a finger pans the canvas instead of moving a card.
+ */
+export const NARROW_MAX = 900;
+const NARROW_QUERY = `(max-width: ${NARROW_MAX}px)`;
+function readNarrow() {
+  if (typeof window === 'undefined') return false;
+  try {
+    if (typeof window.matchMedia === 'function')
+      return window.matchMedia(NARROW_QUERY).matches;
+  } catch {
+    // Fall through to the width, which every environment reports.
+  }
+  return window.innerWidth <= NARROW_MAX;
+}
+/** True while the viewport is at or below NARROW_MAX, kept live on resize. */
+export function useNarrowScreen() {
+  const [narrow, setNarrow] = useState(readNarrow);
+  useEffect(() => {
+    const update = () => setNarrow(readNarrow());
+    window.addEventListener('resize', update);
+    const query =
+      typeof window.matchMedia === 'function'
+        ? window.matchMedia(NARROW_QUERY)
+        : null;
+    query?.addEventListener?.('change', update);
+    update();
+    return () => {
+      window.removeEventListener('resize', update);
+      query?.removeEventListener?.('change', update);
+    };
+  }, []);
+  return narrow;
 }
 
 /* ---------- document hook ---------- */

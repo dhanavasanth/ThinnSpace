@@ -4,13 +4,30 @@ import type { Platform } from './platform.js';
 import {
   FLOW_LIMITS,
   NODE_SPECS,
+  configWithDefaults,
   emptyGraph,
   fieldVisible,
   lintFlow,
   nodeFields,
+  nodeLabel,
+  type Flow,
   type FlowGraph,
 } from '../shared/flows.js';
+import {
+  WEBHOOK_TOKEN_HEADER,
+  type FlowStartInfo,
+  type FlowTriggerInfo,
+} from '../shared/flow-runs.js';
 import { flowTemplate } from '../shared/flow-templates.js';
+
+// The trigger-info contract lives in src/shared so the editor's panel can
+// read it without importing a server module; re-exported here because this
+// is the route that answers it.
+export {
+  WEBHOOK_TOKEN_HEADER,
+  type FlowStartInfo,
+  type FlowTriggerInfo,
+} from '../shared/flow-runs.js';
 
 const position = z.object({ x: z.number().finite(), y: z.number().finite() });
 const nodeSchema = z
@@ -46,6 +63,26 @@ export const graphSchema = z
   })
   .strict();
 
+/**
+ * A schedule Start's interval in words: "Every hour", "Every 30 minutes".
+ * The editor renders `describeSchedule` (src/client/flows/format.ts) in full
+ * sentences; this is the same reading for API callers of `FlowStartInfo`, so
+ * the interval guard comes first here too — a Start with its interval zeroed
+ * reads as unscheduled on both surfaces rather than only on one.
+ */
+export function scheduleWords(config: Record<string, unknown>): string {
+  const seconds = Number(config.schedule) || 0;
+  if (!Number.isFinite(seconds) || seconds <= 0) return 'No schedule set';
+  if (config.scheduleDays === 'weekdays')
+    return `Monday to Friday at ${String(config.scheduleAt || '09:00')}`;
+  const every = (count: number, unit: string) =>
+    count === 1 ? `Every ${unit}` : `Every ${count} ${unit}s`;
+  if (seconds % 604800 === 0) return every(seconds / 604800, 'week');
+  if (seconds % 86400 === 0) return every(seconds / 86400, 'day');
+  if (seconds % 3600 === 0) return every(seconds / 3600, 'hour');
+  return every(Math.max(1, Math.round(seconds / 60)), 'minute');
+}
+
 /** Structural checks that make a graph unsafe to store at all. */
 function graphError(graph: FlowGraph): string | undefined {
   const ids = new Set<string>();
@@ -67,6 +104,67 @@ function graphError(graph: FlowGraph): string | undefined {
 export function flowRoutes(platform: Platform) {
   const app = new Hono();
   const flows = platform.workspace.flows;
+  const runs = platform.workspace.runs;
+  const startNodes = (graph: FlowGraph) =>
+    graph.nodes.filter((node) => node.type === 'start');
+  /**
+   * Webhook URLs, the token and schedule facts for every Start of a flow.
+   * The draft graph says which Starts exist and how they are configured, so
+   * the panel describes the Start the editor is showing — but every fact the
+   * live endpoint enforces (whether the Start is active, whether the hook
+   * demands a token) is read from the registered trigger once the flow is
+   * published, because that is the snapshot the hook route checks. Saying
+   * "no token needed" for a token-gated hook, or the reverse, would be a
+   * security claim that is wrong in the dangerous direction.
+   *
+   * `token` is a secret and only travels when the caller asks for it
+   * (`?secrets=1`, which the Start panel sets): the Flows list reads this
+   * route for `nextRunAt` alone. Reading never mints a token either —
+   * publish does that through syncTriggers, and the panel can POST
+   * /webhook-token for an unpublished flow.
+   */
+  const triggerInfo = (
+    flow: Flow,
+    origin: string,
+    secrets: boolean,
+  ): FlowTriggerInfo => {
+    const registered = runs.triggers(flow.id);
+    const starts = startNodes(flow.graph).map((node) => ({
+      node,
+      config: configWithDefaults('start', node.config),
+    }));
+    return {
+      flowId: flow.id,
+      published: Boolean(flow.publishedVersionId),
+      token: secrets ? runs.webhookToken(flow.id) : null,
+      tokenHeader: WEBHOOK_TOKEN_HEADER,
+      starts: starts.map(({ node, config }) => {
+        const kind = String(config.trigger ?? 'manual');
+        const row = registered.find((trigger) => trigger.nodeId === node.id);
+        // The registered row only speaks for this Start while it is the one
+        // that was published, as the same kind of trigger.
+        const live =
+          flow.publishedVersionId && row && row.kind === kind ? row : undefined;
+        const info: FlowStartInfo = {
+          nodeId: node.id,
+          label: nodeLabel(node),
+          trigger: kind,
+          active: live ? live.active : config.active !== false,
+        };
+        if (kind === 'webhook') {
+          info.url = `${origin}/api/flows/${flow.id}/hooks/${node.id}`;
+          info.tokenRequired = live
+            ? live.config.webhookAuth !== 'none'
+            : config.webhookAuth !== 'none';
+        }
+        if (kind === 'schedule') {
+          info.schedule = scheduleWords(config);
+          info.nextRunAt = row?.active ? row.nextRunAt : null;
+        }
+        return info;
+      }),
+    };
+  };
   /** Templates start usable: required Dot and Space choices take the first available. */
   const fillWorkspaceDefaults = (graph: FlowGraph) => {
     const dot = platform.workspace.dots()[0]?.id;
@@ -102,11 +200,21 @@ export function flowRoutes(platform: Platform) {
       })
       .strict()
       .safeParse(await c.req.json().catch(() => null));
-    if (!data.success)
+    // An import sends a whole graph here, and the import dialog shows this
+    // sentence verbatim: a node id or a stray key must not be reported as a
+    // problem with the flow's name.
+    if (!data.success) {
+      const issue = data.error.issues[0];
       return c.json(
-        { error: 'Give the flow a name (up to 80 characters).' },
+        {
+          error:
+            issue?.path[0] === 'graph'
+              ? `That flow graph is not valid for this version (${issue.path.map(String).join('.')}: ${issue.message}).`
+              : 'Give the flow a name (up to 80 characters).',
+        },
         400,
       );
+    }
     const template = data.data.templateId
       ? flowTemplate(data.data.templateId)
       : undefined;
@@ -206,6 +314,28 @@ export function flowRoutes(platform: Platform) {
     const flow = flows.unpublish(c.req.param('id'));
     platform.runner.syncTriggers(flow.id);
     return c.json(flow);
+  });
+  // What a Start needs to be callable: the hook URL, the interval, and —
+  // for ?secrets=1 only — the webhook token.
+  app.get('/flows/:id/trigger-info', (c) => {
+    const flow = flows.get(c.req.param('id'));
+    if (!flow) return c.json({ error: 'Flow not found.' }, 404);
+    return c.json(
+      triggerInfo(
+        flow,
+        new URL(c.req.url).origin,
+        c.req.query('secrets') === '1',
+      ),
+    );
+  });
+  // Mints a fresh token; every caller using the old one starts failing.
+  app.post('/flows/:id/webhook-token', (c) => {
+    const flow = flows.get(c.req.param('id'));
+    if (!flow) return c.json({ error: 'Flow not found.' }, 404);
+    return c.json({
+      token: runs.resetWebhookToken(flow.id),
+      tokenHeader: WEBHOOK_TOKEN_HEADER,
+    });
   });
   app.post('/flows/:id/validate', (c) => {
     const flow = flows.get(c.req.param('id'));

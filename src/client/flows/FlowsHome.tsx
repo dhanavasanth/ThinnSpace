@@ -2,6 +2,7 @@ import {
   Fragment,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type MouseEvent,
@@ -18,6 +19,7 @@ import {
   Plus,
   Search,
   Trash2,
+  Upload,
   Webhook,
   Workflow,
   X,
@@ -32,10 +34,11 @@ import {
   type FlowSummary,
 } from '../../shared/flows';
 import { FLOW_TEMPLATES, type FlowTemplate } from '../../shared/flow-templates';
+import type { FlowTriggerInfo } from '../../shared/flow-runs';
 import { api } from '../api';
 import type { FlowsHomeProps } from './contract';
 import { nodeIcon as iconFor } from './FlowNodeCard';
-import { ConfirmDialog } from './FlowVersions';
+import { ConfirmDialog, countdown, useFlowImport } from './FlowVersions';
 import { relativeTime } from './format';
 import './flow-home.css';
 
@@ -110,12 +113,95 @@ export function NodeChipStrip({
 
 const stop = (event: MouseEvent) => event.stopPropagation();
 
+/**
+ * When each published flow's schedule fires next, asked for once per card.
+ * Draft flows have no registered triggers, so they are never asked; a flow
+ * whose answer fails simply shows no next run.
+ *
+ * Two things this has to get right. The shell replaces `workspace` every few
+ * seconds, so `flows` is a fresh array that often: the effect keys on the
+ * published ids rather than the array, and "cancelled" means unmounted, not
+ * "the list was replaced" — otherwise an answer that lands just after a
+ * refresh is dropped and, the flow having been marked as asked, never
+ * requested again. And a slot that fires is forgotten, so the chip shows the
+ * following slot instead of disappearing for the rest of the session.
+ */
+function useNextRuns(flows: FlowSummary[]) {
+  const [next, setNext] = useState<Record<string, number>>({});
+  const asked = useRef(new Set<string>());
+  const alive = useRef(true);
+  useEffect(
+    () => () => {
+      alive.current = false;
+    },
+    [],
+  );
+  const nextRef = useRef(next);
+  nextRef.current = next;
+  const [sweep, setSweep] = useState(0);
+  const published = flows
+    .filter((flow) => flow.status !== 'draft')
+    .map((flow) => flow.id)
+    .join(',');
+  useEffect(() => {
+    for (const id of published ? published.split(',') : []) {
+      if (asked.current.has(id)) continue;
+      asked.current.add(id);
+      api<FlowTriggerInfo>(`/flows/${id}/trigger-info`)
+        .then((info) => {
+          const soonest = info.starts
+            .map((start) =>
+              start.trigger === 'schedule' ? (start.nextRunAt ?? 0) : 0,
+            )
+            .filter((at) => at > 0)
+            .sort((a, b) => a - b)[0];
+          if (alive.current && soonest)
+            setNext((current) => ({ ...current, [id]: soonest }));
+        })
+        .catch(() => undefined);
+    }
+  }, [published, sweep]);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const fired = Object.entries(nextRef.current)
+        .filter(([, at]) => at <= now)
+        .map(([id]) => id);
+      if (!fired.length) return;
+      for (const id of fired) asked.current.delete(id);
+      setNext((current) => {
+        const remaining = { ...current };
+        for (const id of fired) delete remaining[id];
+        return remaining;
+      });
+      setSweep((count) => count + 1);
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return next;
+}
+
 export function FlowsHome({
   flows,
+  workspace,
   onOpen,
   onRefresh,
   createRequested,
 }: FlowsHomeProps) {
+  const importer = useFlowImport({
+    workspace,
+    onCreated: (flow) => {
+      onRefresh();
+      onOpen(flow.id);
+    },
+  });
+  const nextRuns = useNextRuns(flows);
+  // One ticking clock keeps every card's "Next run in 4h" roughly honest.
+  const [clock, setClock] = useState(Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 30000);
+    return () => window.clearInterval(timer);
+  }, []);
   const [search, setSearch] = useState('');
   const [creating, setCreating] = useState(false);
   // The sidebar '+' lands here with the new-flow form open and focused.
@@ -227,14 +313,20 @@ export function FlowsHome({
               human in the loop wherever you want one.
             </p>
           </div>
-          <button
-            className="primary"
-            aria-expanded={creating}
-            onClick={() => setCreating((open) => !open)}
-          >
-            <Plus size={15} />
-            New flow
-          </button>
+          <div className="flow-home-actions">
+            <button onClick={importer.begin}>
+              <Upload size={15} />
+              Import flow
+            </button>
+            <button
+              className="primary"
+              aria-expanded={creating}
+              onClick={() => setCreating((open) => !open)}
+            >
+              <Plus size={15} />
+              New flow
+            </button>
+          </div>
         </header>
         {error && (
           <p className="chat-error flow-home-error" role="alert">
@@ -340,6 +432,10 @@ export function FlowsHome({
               {visible.map((flow) => {
                 const trigger = flowTrigger(flow.trigger);
                 const Trigger = trigger.icon;
+                // The time was read once, so drop the chip rather than let
+                // it sit on "Next run now" after the runner has fired.
+                const nextRun =
+                  nextRuns[flow.id] > clock ? nextRuns[flow.id] : undefined;
                 const editing = renaming?.id === flow.id;
                 return (
                   <article
@@ -473,6 +569,15 @@ export function FlowsHome({
                         <i aria-hidden />
                         {flowStatusLabel(flow.status)}
                       </span>
+                      {nextRun && (
+                        <span
+                          className="flow-next-run"
+                          title={new Date(nextRun).toLocaleString()}
+                        >
+                          <Clock size={11} aria-hidden />
+                          Next run {countdown(nextRun, clock)}
+                        </span>
+                      )}
                       <span className="flow-card-meta">
                         {flow.nodeCount}{' '}
                         {flow.nodeCount === 1 ? 'step' : 'steps'}
@@ -488,6 +593,7 @@ export function FlowsHome({
           )}
         </section>
       </div>
+      {importer.element}
       {deleting && (
         <ConfirmDialog
           title={`Delete “${deleting.name}”?`}

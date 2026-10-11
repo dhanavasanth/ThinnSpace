@@ -69,7 +69,16 @@ export function createApp({
       return c.json({ error: 'Cross-origin requests are not allowed.' }, 403);
     if (c.req.header('sec-fetch-site') === 'cross-site')
       return c.json({ error: 'Cross-site requests are not allowed.' }, 403);
-    if (ownerToken) {
+    // A flow's webhook Start carries its own credential (the flow token, see
+    // flow-run-routes.ts), and an outside caller cannot have the owner token:
+    // without this exemption the copy-pasteable curl in the Start panel would
+    // 401 on every deployment where a webhook is reachable at all. The host,
+    // origin and sec-fetch checks above still apply, and the hook route
+    // refuses a tokenless webhook off loopback.
+    const isWebhookHook =
+      c.req.method === 'POST' &&
+      /^\/api\/flows\/[^/]+\/hooks\/[^/]+$/.test(requestUrl.pathname);
+    if (ownerToken && !isWebhookHook) {
       const expected = Buffer.from(ownerToken);
       const supplied = Buffer.from(
         c.req.header('authorization')?.replace(/^Bearer /, '') ?? '',

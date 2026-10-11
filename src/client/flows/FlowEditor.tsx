@@ -31,7 +31,15 @@ import {
   type NodeChange,
   type OnConnectEnd,
 } from '@xyflow/react';
-import { Play, Plus, Square, WandSparkles, X } from 'lucide-react';
+import {
+  ListOrdered,
+  Play,
+  Plus,
+  ShieldCheck,
+  Square,
+  WandSparkles,
+  X,
+} from 'lucide-react';
 import { ApiError, api } from '../api';
 import {
   FLOW_LIMITS,
@@ -49,7 +57,7 @@ import {
   type FlowProblem,
   type PortKind,
 } from '../../shared/flows';
-import type { FlowEditorProps } from './contract';
+import { flowRoute, type FlowEditorProps } from './contract';
 import { upstreamRefs } from './upstream';
 import { FlowProperties } from './FlowProperties';
 import {
@@ -84,6 +92,7 @@ import {
 } from './FlowVersions';
 import {
   NOTE_SIZE,
+  applyNodePatch,
   connectionProblem,
   deselect,
   edgeFrom,
@@ -97,6 +106,7 @@ import {
   toGraph,
   useCanvasEdits,
   useFlowDocument,
+  useNarrowScreen,
 } from './flow-history';
 
 const nodeTypes = { flow: FlowNodeCard };
@@ -267,6 +277,10 @@ function FlowEditorInner({
   const [previewKey, setPreviewKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [panelWidth, setPanelWidth] = useState(readPanelWidth);
+  // Below 900px the right slot is a bottom sheet, the minimap goes, and
+  // cards stop being draggable so a finger pans the canvas (see the
+  // matching media query in flow-editor.css).
+  const narrow = useNarrowScreen();
   const noticeTimer = useRef(0);
   const editorRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -305,14 +319,31 @@ function FlowEditorInner({
     return { steps, count: order.length, waves: waves + 1 };
   }, [graph, previewing]);
   const exitPreview = useCallback(() => setPreviewKey(null), []);
+  /**
+   * Below 900px the properties sheet covers the bottom slot, so a tray
+   * opened under it would render nothing while its control reported itself
+   * pressed. Opening a tray closes the sheet instead.
+   */
+  const sheetAside = useCallback(() => {
+    if (!narrow) return;
+    setPicker(null);
+    setCanvas(
+      deselect(nodesRef.current),
+      edgesRef.current.map((edge) =>
+        edge.selected ? { ...edge, selected: false } : edge,
+      ),
+    );
+  }, [edgesRef, narrow, nodesRef, setCanvas]);
   const showProblems = useCallback(() => {
+    sheetAside();
     setRunOpen(false);
     setProblemsOpen(true);
-  }, []);
+  }, [sheetAside]);
   const showRuns = useCallback(() => {
+    sheetAside();
     setProblemsOpen(false);
     setRunOpen(true);
-  }, []);
+  }, [sheetAside]);
   // The badge counts reviews of this flow only; a review on another flow
   // cannot be decided from this canvas.
   const flowReviews = useMemo(
@@ -325,6 +356,18 @@ function FlowEditorInner({
     const review = flowReviews[0];
     if (!runState.run && review) void runState.load(review.runId);
   };
+  // Opened as `#/flows/:id?run=:runId` from the Reviews inbox or the Flow
+  // runs activity list: that run comes up in the tray, so the row that was
+  // clicked is the row the editor shows. Read once, on mount.
+  const [deepLinkRun] = useState(() =>
+    new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('run'),
+  );
+  const loadRun = runState.load;
+  useEffect(() => {
+    if (!deepLinkRun) return;
+    setRunOpen(true);
+    void loadRun(deepLinkRun);
+  }, [deepLinkRun, loadRun]);
   // Step statuses from the loaded run are painted onto the cards while the
   // run is active and, once it has finished, until the graph is edited (or
   // the run is cleared from the tray).
@@ -607,27 +650,29 @@ function FlowEditorInner({
     () => ({
       renamingId,
       setRenamingId,
+      // A rename also repairs the {{chips}} downstream that named this
+      // card, in the same edit, so one undo takes both back.
       rename: (id, label) =>
         mutate(
           (current) => ({
-            nodes: current.map((n) =>
-              n.id === id
-                ? patchEditorNode(
-                    n,
-                    {
-                      label: label.trim().slice(0, NODE_LABEL_MAX) || undefined,
-                    },
-                    workspaceRef.current,
-                  )
-                : n,
+            nodes: applyNodePatch(
+              current,
+              edgesRef.current,
+              id,
+              { label: label.trim().slice(0, NODE_LABEL_MAX) || undefined },
+              workspaceRef.current,
             ),
           }),
           `rename:${id}`,
         ),
       patchNode: (id, patch, commitNow = true) => {
         const apply = (current: EditorNode[]) =>
-          current.map((n) =>
-            n.id === id ? patchEditorNode(n, patch, workspaceRef.current) : n,
+          applyNodePatch(
+            current,
+            edgesRef.current,
+            id,
+            patch,
+            workspaceRef.current,
           );
         if (commitNow)
           mutate((current) => ({ nodes: apply(current) }), `patch:${id}`);
@@ -1022,6 +1067,13 @@ function FlowEditorInner({
           })
         }
         onDelete={() => setDeleteOpen(true)}
+        workspace={workspace}
+        // Importing from inside the editor lands on the new flow; the shell
+        // reloads its flow list so the sidebar does not lag behind.
+        onImported={(created) => {
+          onRefresh();
+          window.location.hash = flowRoute(created.id);
+        }}
       />
       {doc.saveState.status === 'conflict' && (
         <div className="flow-banner" role="alert">
@@ -1032,7 +1084,7 @@ function FlowEditorInner({
           </button>
         </div>
       )}
-      <div className="flow-body">
+      <div className={`flow-body${slotOpen ? ' with-slot' : ''}`}>
         <div className="flow-center">
           {preview && (
             <div className="flow-preview-banner" role="status">
@@ -1071,6 +1123,7 @@ function FlowEditorInner({
                       applyEdgeChanges(changes, edgesRef.current),
                     )
                   }
+                  nodesDraggable={!narrow}
                   onConnect={onConnect}
                   onConnectEnd={onConnectEnd}
                   isValidConnection={isValidConnection}
@@ -1101,19 +1154,24 @@ function FlowEditorInner({
                     gap={20}
                     size={1.3}
                   />
-                  <MiniMap
-                    position="bottom-right"
-                    pannable
-                    zoomable
-                    style={{ width: 160, height: 104 }}
-                    nodeStrokeWidth={0}
-                    nodeColor={(node) =>
-                      categoryColor((node as EditorNode).data.node.type)
-                    }
-                  />
+                  {!narrow && (
+                    <MiniMap
+                      position="bottom-right"
+                      pannable
+                      zoomable
+                      style={{ width: 160, height: 104 }}
+                      nodeStrokeWidth={0}
+                      nodeColor={(node) =>
+                        categoryColor((node as EditorNode).data.node.type)
+                      }
+                    />
+                  )}
                   <Controls
                     position="bottom-left"
                     fitViewOptions={{ padding: 0.2, maxZoom: 1 }}
+                    // The lock toggles dragging, which the width already
+                    // decides on a narrow screen.
+                    showInteractive={!narrow}
                   >
                     <ControlButton
                       onClick={tidy}
@@ -1122,6 +1180,33 @@ function FlowEditorInner({
                     >
                       <WandSparkles size={13} />
                     </ControlButton>
+                    {/* The header drops its secondary actions below 900px;
+                        these two keep working from the canvas. */}
+                    {narrow && (
+                      <ControlButton
+                        onClick={togglePreview}
+                        title={
+                          previewing
+                            ? 'Exit the run-order preview'
+                            : 'Preview run order'
+                        }
+                        aria-label={
+                          previewing ? 'Exit preview' : 'Preview run order'
+                        }
+                        aria-pressed={previewing}
+                      >
+                        <ListOrdered size={13} />
+                      </ControlButton>
+                    )}
+                    {narrow && (
+                      <ControlButton
+                        onClick={() => void validate()}
+                        title="Validate"
+                        aria-label="Validate"
+                      >
+                        <ShieldCheck size={13} />
+                      </ControlButton>
+                    )}
                   </Controls>
                   <Panel position="top-right">
                     <RunsButton
@@ -1163,29 +1248,36 @@ function FlowEditorInner({
               </PreviewContext.Provider>
             </EditorActionsContext.Provider>
           </div>
-          {runOpen ? (
-            <RunTray
-              run={runState.run}
-              runs={runState.runs}
-              runsLoaded={runState.runsLoaded}
-              busy={runState.busy}
-              error={runState.error}
-              order={stepOrder}
-              onClose={() => setRunOpen(false)}
-              onStop={() => void runState.cancel()}
-              onSelectRun={(runId) => void runState.load(runId)}
-              onDecide={runState.decide}
-              onDismiss={runState.dismiss}
-              onFocusNode={focusRunStep}
-            />
-          ) : problemsOpen ? (
-            <ProblemsTray
-              problems={problems}
-              nodes={snapshot.nodes}
-              onSelect={focusProblem}
-              onClose={() => setProblemsOpen(false)}
-            />
-          ) : null}
+          {/* One panel at a time below 900px: the bottom sheet and a tray
+              together would leave no canvas, so the tray is hidden while the
+              sheet is open and comes back when it closes. It stays mounted,
+              so a half-typed approval note survives the detour (the wrapper
+              is `display: contents` until `hidden`, see flow-editor.css). */}
+          <div className="flow-tray-slot" hidden={narrow && slotOpen}>
+            {runOpen ? (
+              <RunTray
+                run={runState.run}
+                runs={runState.runs}
+                runsLoaded={runState.runsLoaded}
+                busy={runState.busy}
+                error={runState.error}
+                order={stepOrder}
+                onClose={() => setRunOpen(false)}
+                onStop={() => void runState.cancel()}
+                onSelectRun={(runId) => void runState.load(runId)}
+                onDecide={runState.decide}
+                onDismiss={runState.dismiss}
+                onFocusNode={focusRunStep}
+              />
+            ) : problemsOpen ? (
+              <ProblemsTray
+                problems={problems}
+                nodes={snapshot.nodes}
+                onSelect={focusProblem}
+                onClose={() => setProblemsOpen(false)}
+              />
+            ) : null}
+          </div>
         </div>
         {slotOpen && (
           <div

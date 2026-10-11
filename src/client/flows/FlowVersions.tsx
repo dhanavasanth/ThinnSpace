@@ -3,7 +3,13 @@
  * dialog, the Versions drawer, the Problems tray, the Help > Shortcuts
  * sheet, and the loading/error screens.
  */
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from 'react';
 import {
   Check,
   ChevronLeft,
@@ -20,12 +26,19 @@ import {
 } from 'lucide-react';
 import { api } from '../api';
 import {
+  FLOW_LIMITS,
+  NODE_SPECS,
+  nodeFields,
   nodeLabel,
+  type Flow,
+  type FlowGraph,
   type FlowNode,
   type FlowProblem,
   type FlowStatus,
   type FlowVersion,
 } from '../../shared/flows';
+import type { WorkspaceState } from '../../shared/types';
+import { flowRoute } from './contract';
 import type { SaveState } from './flow-history';
 import { relativeTime } from './format';
 
@@ -89,6 +102,13 @@ export interface FlowHeaderProps {
   onVersions: () => void;
   onExport: () => void;
   onDelete: () => void;
+  /**
+   * Called with the flow an "Import JSON" created. Left out, the header
+   * navigates to the new flow itself.
+   */
+  onImported?: (flow: Flow) => void;
+  /** Re-links an imported flow's Dot and Space ids; fetched when absent. */
+  workspace?: WorkspaceState;
 }
 
 /** Why Publish is disabled right now, or undefined when it may be clicked. */
@@ -215,7 +235,10 @@ export function FlowHeader({
   onVersions,
   onExport,
   onDelete,
+  onImported,
+  workspace,
 }: FlowHeaderProps) {
+  const importer = useFlowImport({ workspace, onCreated: onImported });
   const [editing, setEditing] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
@@ -309,7 +332,12 @@ export function FlowHeader({
       )}
       <span className={`flow-save-chip ${chip.tone}`} title={chip.title}>
         {chip.text}
-        {'when' in chip && <span aria-hidden="true"> {chip.when}</span>}
+        {'when' in chip && (
+          <span className="flow-save-when" aria-hidden="true">
+            {' '}
+            {chip.when}
+          </span>
+        )}
         {saveState.status === 'error' && (
           <button
             type="button"
@@ -366,7 +394,11 @@ export function FlowHeader({
           <Redo2 size={15} />
         </button>
       </div>
-      <button type="button" onClick={onValidate}>
+      <button
+        type="button"
+        className="flow-validate-button"
+        onClick={onValidate}
+      >
         Validate
       </button>
       <button
@@ -406,7 +438,7 @@ export function FlowHeader({
       </div>
       <button
         type="button"
-        className="icon-button"
+        className="icon-button flow-shortcuts-button"
         aria-label="Keyboard shortcuts"
         title="Keyboard shortcuts"
         onClick={onShortcuts}
@@ -434,12 +466,14 @@ export function FlowHeader({
               {menuItem('Duplicate flow', onDuplicate)}
               {menuItem('Versions', onVersions)}
               {menuItem('Export JSON', onExport)}
+              {menuItem('Import JSON', importer.begin)}
               {status !== 'draft' && menuItem('Unpublish', onUnpublish)}
               {menuItem('Delete flow', onDelete, true)}
             </div>
           </>
         )}
       </div>
+      {importer.element}
     </header>
   );
 }
@@ -876,4 +910,461 @@ export function ShortcutsSheet({
       </div>
     </div>
   );
+}
+
+/* ---------- a small dialog, and importing a flow from a file ---------- */
+
+export interface FlowDialogProps {
+  title: string;
+  children: ReactNode;
+  /** Omitted for a message that only needs dismissing. */
+  confirmLabel?: string;
+  busyLabel?: string;
+  danger?: boolean;
+  /** A rejection is shown inline and the dialog stays open. */
+  onConfirm?: () => Promise<void> | void;
+  onClose: () => void;
+  closeLabel?: string;
+}
+
+/**
+ * The confirm dialog's shell with a free-form body, shared by the import
+ * summary, its error message and the webhook-token warning.
+ */
+export function FlowDialog({
+  title,
+  children,
+  confirmLabel,
+  busyLabel,
+  danger,
+  onConfirm,
+  onClose,
+  closeLabel = 'Cancel',
+}: FlowDialogProps) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    closeRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      onClose();
+    };
+    window.addEventListener('keydown', close, true);
+    return () => window.removeEventListener('keydown', close, true);
+  }, [onClose]);
+  const confirm = async () => {
+    if (busy || !onConfirm) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm();
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : 'Something went wrong.',
+      );
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flow-sheet-backdrop" onPointerDown={onClose}>
+      <div
+        className="flow-confirm"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="flow-dialog-title"
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <strong id="flow-dialog-title">{title}</strong>
+        <div className="flow-dialog-body">{children}</div>
+        {error && (
+          <p className="error flow-confirm-error" role="alert">
+            {error}
+          </p>
+        )}
+        <div className="flow-confirm-actions">
+          <button
+            type="button"
+            ref={closeRef}
+            onClick={onClose}
+            disabled={busy}
+          >
+            {onConfirm ? closeLabel : 'Close'}
+          </button>
+          {onConfirm && (
+            <button
+              type="button"
+              className={danger ? 'danger' : 'primary'}
+              onClick={() => void confirm()}
+              disabled={busy}
+            >
+              {busy ? (busyLabel ?? 'Working…') : (confirmLabel ?? 'Confirm')}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** A reference an import had to drop, because this workspace has no such id. */
+export interface ClearedRef {
+  /** The step the field belongs to. */
+  node: string;
+  /** The field's label ("Dot", "Space"). */
+  field: string;
+  /** The name the exporting workspace recorded, when the file carried one. */
+  name?: string;
+}
+/** A reference matched to a Dot or Space of this workspace by its name. */
+export interface RelinkedRef {
+  node: string;
+  field: string;
+  /** The name both workspaces agree on. */
+  name: string;
+}
+/** What `relinkGraph` did to a parsed file. */
+export interface RelinkResult {
+  cleared: ClearedRef[];
+  relinked: RelinkedRef[];
+}
+/** A file that parsed and was re-linked against this workspace. */
+export interface StagedImport extends RelinkResult {
+  name: string;
+  description: string;
+  graph: FlowGraph;
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * Reads an exported `{name, description, graph}` file. Throws an Error whose
+ * message is the sentence to show the person, so every refusal explains
+ * itself rather than failing later on the server.
+ */
+export function parseFlowFile(
+  text: string,
+): Pick<StagedImport, 'name' | 'description' | 'graph'> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error('That file is not JSON.');
+  }
+  if (!isRecord(parsed)) throw new Error('That file does not describe a flow.');
+  const graph = parsed.graph;
+  if (
+    !isRecord(graph) ||
+    !Array.isArray(graph.nodes) ||
+    !Array.isArray(graph.edges)
+  )
+    throw new Error(
+      'That file has no flow graph. Export a flow to see the shape this expects.',
+    );
+  if (graph.schema !== 1)
+    throw new Error(
+      `This file uses graph schema ${String(graph.schema)}; this version reads schema 1.`,
+    );
+  if (!graph.nodes.length) throw new Error('That flow has no steps.');
+  if (graph.nodes.length > FLOW_LIMITS.nodes)
+    throw new Error(
+      `That flow has ${graph.nodes.length} steps; the limit is ${FLOW_LIMITS.nodes}.`,
+    );
+  if (graph.edges.length > FLOW_LIMITS.edges)
+    throw new Error(
+      `That flow has ${graph.edges.length} connections; the limit is ${FLOW_LIMITS.edges}.`,
+    );
+  const unknown = new Set<string>();
+  for (const node of graph.nodes) {
+    if (
+      !isRecord(node) ||
+      typeof node.id !== 'string' ||
+      typeof node.type !== 'string' ||
+      typeof node.typeVersion !== 'number' ||
+      !isRecord(node.position) ||
+      typeof node.position.x !== 'number' ||
+      typeof node.position.y !== 'number' ||
+      !isRecord(node.config)
+    )
+      throw new Error('A step in that file is missing its basic fields.');
+    if (!NODE_SPECS[node.type]) unknown.add(node.type);
+  }
+  for (const edge of graph.edges)
+    if (
+      !isRecord(edge) ||
+      typeof edge.id !== 'string' ||
+      typeof edge.source !== 'string' ||
+      typeof edge.target !== 'string' ||
+      typeof edge.sourceHandle !== 'string' ||
+      typeof edge.targetHandle !== 'string'
+    )
+      throw new Error('A connection in that file is missing its ends.');
+  if (unknown.size)
+    throw new Error(
+      `That file uses ${unknown.size === 1 ? 'a step' : 'steps'} this version does not know: ${[...unknown].join(', ')}.`,
+    );
+  const name =
+    (typeof parsed.name === 'string' ? parsed.name.trim() : '') ||
+    'Imported flow';
+  return {
+    name: name.slice(0, FLOW_LIMITS.name),
+    description:
+      typeof parsed.description === 'string'
+        ? parsed.description.slice(0, FLOW_LIMITS.description)
+        : '',
+    graph: graph as unknown as FlowGraph,
+  };
+}
+
+/** Lowercased name -> every id of this workspace answering to it. */
+function byName(items: { id: string; name: string }[]) {
+  const map = new Map<string, string[]>();
+  for (const item of items) {
+    const key = item.name.trim().toLowerCase();
+    if (!key) continue;
+    map.set(key, [...(map.get(key) ?? []), item.id]);
+  }
+  return map;
+}
+
+/**
+ * Re-links an imported graph against this workspace. A Dot or Space id the
+ * workspace does not have is matched to a local one by the name the export
+ * recorded (`<key>Name`, written beside every id since this version) when
+ * exactly one local Dot or Space answers to it; otherwise the field is
+ * cleared, so the flow imports with honest "required" problems instead of
+ * silently pointing at nothing.
+ *
+ * Ids that only mean something *under* another binding go with it, because
+ * the new workspace numbers them differently: page fields follow their
+ * Space, and tool fields (plus the `<key>Title` / `<key>Connection` labels
+ * written beside them) follow their Dot — a tool left pointing at the
+ * exporting workspace's connection id passes the linter and then fails at
+ * run time in `resolveTool`.
+ *
+ * Mutates `graph` and reports what it changed.
+ */
+export function relinkGraph(
+  graph: FlowGraph,
+  workspace: {
+    dots: { id: string; name: string }[];
+    spaces: { id: string; name: string }[];
+  },
+): RelinkResult {
+  const ids = {
+    dot: new Set(workspace.dots.map((dot) => dot.id)),
+    space: new Set(workspace.spaces.map((space) => space.id)),
+  };
+  const names = {
+    dot: byName(workspace.dots),
+    space: byName(workspace.spaces),
+  };
+  const cleared: ClearedRef[] = [];
+  const relinked: RelinkedRef[] = [];
+  for (const node of graph.nodes) {
+    const fields = nodeFields(node.type);
+    let spaceMoved = false;
+    let dotMoved = false;
+    for (const field of fields) {
+      const kind = field.control;
+      if (kind !== 'dot' && kind !== 'space') continue;
+      const value = node.config[field.key];
+      if (typeof value !== 'string' || !value) continue;
+      if (ids[kind].has(value)) continue;
+      const recorded =
+        typeof node.config[`${field.key}Name`] === 'string'
+          ? (node.config[`${field.key}Name`] as string).trim()
+          : '';
+      const matches = recorded
+        ? (names[kind].get(recorded.toLowerCase()) ?? [])
+        : [];
+      if (kind === 'space') spaceMoved = true;
+      else dotMoved = true;
+      if (matches.length === 1) {
+        node.config[field.key] = matches[0];
+        relinked.push({
+          node: nodeLabel(node),
+          field: field.label,
+          name: recorded,
+        });
+        continue;
+      }
+      delete node.config[field.key];
+      delete node.config[`${field.key}Name`];
+      cleared.push({
+        node: nodeLabel(node),
+        field: field.label,
+        ...(recorded ? { name: recorded } : {}),
+      });
+    }
+    // A page id only means anything inside its Space, and a tool id only
+    // inside the connections of its Dot.
+    for (const field of fields) {
+      const follows =
+        (spaceMoved && field.control === 'page') ||
+        (dotMoved && field.control === 'tool');
+      if (!follows || node.config[field.key] === undefined) continue;
+      delete node.config[field.key];
+      delete node.config[`${field.key}Name`];
+      delete node.config[`${field.key}Title`];
+      delete node.config[`${field.key}Connection`];
+      if (field.control === 'tool')
+        cleared.push({ node: nodeLabel(node), field: field.label });
+    }
+  }
+  return { cleared, relinked };
+}
+
+/**
+ * The "Import JSON" action: a hidden file input, the summary dialog and the
+ * POST that creates the flow. `element` must be rendered; `begin` opens the
+ * file picker. Without `onCreated` the browser navigates to the new flow.
+ */
+export function useFlowImport({
+  workspace,
+  onCreated,
+}: {
+  /** Used to re-link Dot and Space ids; fetched when it is not given. */
+  workspace?: WorkspaceState;
+  onCreated?: (flow: Flow) => void;
+} = {}) {
+  const [staged, setStaged] = useState<StagedImport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const begin = () => {
+    setError(null);
+    setStaged(null);
+    if (input.current) input.current.value = '';
+    input.current?.click();
+  };
+  const read = async (file: File) => {
+    try {
+      const parsed = parseFlowFile(await file.text());
+      const known = workspace ?? (await api<WorkspaceState>('/workspace'));
+      setStaged({ ...parsed, ...relinkGraph(parsed.graph, known) });
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : 'That file could not be read.',
+      );
+    }
+  };
+  const create = async () => {
+    if (!staged) return;
+    const flow = await api<Flow>('/flows', 'POST', {
+      name: staged.name,
+      description: staged.description,
+      graph: staged.graph,
+    });
+    setStaged(null);
+    if (onCreated) onCreated(flow);
+    else window.location.hash = flowRoute(flow.id);
+  };
+  const steps = staged?.graph.nodes.length ?? 0;
+  const element = (
+    <>
+      <input
+        ref={input}
+        type="file"
+        accept="application/json,.json"
+        hidden
+        aria-hidden="true"
+        tabIndex={-1}
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) void read(file);
+        }}
+      />
+      {error && (
+        <FlowDialog
+          title="That file is not a flow"
+          onClose={() => setError(null)}
+        >
+          <p>{error}</p>
+        </FlowDialog>
+      )}
+      {staged && (
+        <FlowDialog
+          title={`Import “${staged.name}”?`}
+          confirmLabel="Create flow"
+          busyLabel="Creating…"
+          onConfirm={create}
+          onClose={() => setStaged(null)}
+        >
+          <p>
+            {steps} {steps === 1 ? 'step' : 'steps'}
+            {staged.description ? ` · ${staged.description}` : ''}
+          </p>
+          {staged.relinked.length > 0 && (
+            <>
+              <p className="muted">
+                {staged.relinked.length}{' '}
+                {staged.relinked.length === 1 ? 'reference' : 'references'}{' '}
+                {staged.relinked.length === 1 ? 'was' : 'were'} matched to a Dot
+                or Space here with the same name.
+              </p>
+              <ul className="flow-import-cleared">
+                {staged.relinked.slice(0, 8).map((ref, index) => (
+                  <li key={`relinked-${ref.node}-${ref.field}-${index}`}>
+                    {ref.node} · {ref.field} → {ref.name}
+                  </li>
+                ))}
+                {staged.relinked.length > 8 && (
+                  <li className="muted">
+                    and {staged.relinked.length - 8} more
+                  </li>
+                )}
+              </ul>
+            </>
+          )}
+          {staged.cleared.length > 0 ? (
+            <>
+              <p className="flow-import-warn">
+                {staged.cleared.length}{' '}
+                {staged.cleared.length === 1 ? 'reference' : 'references'} from
+                the other workspace{' '}
+                {staged.cleared.length === 1 ? 'does' : 'do'} not exist here and{' '}
+                {staged.cleared.length === 1 ? 'was' : 'were'} cleared. The new
+                flow shows them as required so you can pick replacements.
+              </p>
+              <ul className="flow-import-cleared">
+                {staged.cleared.slice(0, 8).map((ref, index) => (
+                  <li key={`${ref.node}-${ref.field}-${index}`}>
+                    {ref.node} · {ref.field}
+                    {ref.name ? ` (was “${ref.name}”)` : ''}
+                  </li>
+                ))}
+                {staged.cleared.length > 8 && (
+                  <li className="muted">
+                    and {staged.cleared.length - 8} more
+                  </li>
+                )}
+              </ul>
+            </>
+          ) : (
+            !staged.relinked.length && (
+              <p className="muted">
+                Every Dot and Space this flow uses exists here.
+              </p>
+            )
+          )}
+        </FlowDialog>
+      )}
+    </>
+  );
+  return { begin, element };
+}
+
+/** "now", "in 12m", "in 4h", "in 3d": a future time, for trigger panels. */
+export function countdown(at: number, now = Date.now()): string {
+  const seconds = Math.round((at - now) / 1000);
+  if (seconds <= 30) return 'now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `in ${Math.max(1, minutes)}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `in ${hours}h`;
+  return `in ${Math.round(hours / 24)}d`;
 }

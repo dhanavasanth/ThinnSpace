@@ -649,3 +649,29 @@
     animation: none !important;
   }
 }
+
+/* ---------- narrow screens ---------- */
+/* Cards keep their width and type below 900px; only the touch targets grow.
+   Dragging a card is off there (FlowEditor binds nodesDraggable to the same
+   breakpoint), so the ports are what a finger still has to hit: each handle
+   keeps its painted size and gains an invisible hit area around it. */
+@media (max-width: 900px) {
+  .flow-editor .react-flow__handle.fnode-handle::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 26px;
+    /* The port rows are 18px apart; a taller box would steal its neighbour's
+       taps. */
+    height: 18px;
+    transform: translate(-50%, -50%);
+  }
+  /* The hover grow is a pointer affordance and reads as a flicker on touch. */
+  .flow-editor .react-flow__handle.fnode-handle.react-flow__handle-left:hover {
+    transform: translate(-50%, -50%);
+  }
+  .flow-editor .react-flow__handle.fnode-handle.react-flow__handle-right:hover {
+    transform: translate(50%, -50%);
+  }
+}
