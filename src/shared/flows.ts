@@ -85,6 +85,18 @@ const CONTEXT_IN: PortSpec = {
   multiple: true,
 };
 
+/**
+ * Bounds the steps that would otherwise let one flow run forever. They live
+ * here because the linter reports them while the flow is drawn and the engine
+ * clamps to the same numbers while it runs.
+ */
+/** Longest a Wait step may pause: 24 hours. */
+export const WAIT_MAX_MINUTES = 1440;
+/** Items a For each container handles at once. */
+export const FOR_EACH_MAX_CONCURRENCY = 5;
+/** How deep Run flow may nest child runs, the top-level run included. */
+export const MAX_FLOW_DEPTH = 3;
+
 export const NODE_CATALOG: NodeCategory[] = [
   {
     id: 'start',
@@ -128,7 +140,8 @@ export const NODE_CATALOG: NodeCategory[] = [
             label: 'Only in channel',
             control: 'text',
             required: false,
-            placeholder: '#support (leave empty for any)',
+            placeholder: 'C01ABCDEF (leave empty for any)',
+            help: 'The channel id Slack reports, as shown by "Copy link".',
             showWhen: { key: 'trigger', values: ['slack'] },
           },
           {
@@ -671,14 +684,15 @@ export const NODE_CATALOG: NodeCategory[] = [
             default: 'inbox',
             options: [
               { value: 'inbox', label: 'Run log' },
-              // Proactive Slack posts need an API the Channels SDK does not
-              // expose yet; both are declared so the flow keeps the choice,
+              // Posting into an arbitrary channel needs an API the Channels
+              // SDK does not expose yet, so it stays declared-but-unavailable
               // and lintFlow warns before the run rather than during it.
+              // Replying in the thread that started the run works: the Slack
+              // Start hands the run that thread.
               { value: 'slack', label: 'Slack channel', unavailable: true },
               {
                 value: 'thread',
                 label: 'The Slack thread that started this flow',
-                unavailable: true,
               },
             ],
           },
@@ -953,8 +967,11 @@ export const NODE_CATALOG: NodeCategory[] = [
   },
   {
     id: 'team',
-    label: 'Coming soon',
-    color: '#94a3b8',
+    label: 'Advanced',
+    // Every node filed here ships, so the category carries a colour of its
+    // own rather than the grey that used to mean "coming soon". Indigo keeps
+    // it apart from Logic's slate and Actions' violet.
+    color: '#4f46e5',
     nodes: [
       {
         type: 'dot-team',
@@ -963,7 +980,6 @@ export const NODE_CATALOG: NodeCategory[] = [
         description:
           'A manager Dot delegates to specialist Dots in a bounded huddle and returns one result.',
         icon: 'Users',
-        comingSoon: true,
         inputs: [CONTEXT_IN],
         outputs: [
           { id: 'result', label: 'Result', kind: 'text' },
@@ -978,11 +994,21 @@ export const NODE_CATALOG: NodeCategory[] = [
           },
           { key: 'goal', label: 'Goal', control: 'textarea', required: true },
           {
+            key: 'workers',
+            label: 'Workers',
+            control: 'json',
+            required: true,
+            placeholder:
+              '[{ "dotId": "dot_123", "when": "Checks the numbers" }]',
+            help: 'Rows of { dotId, when }. The manager asks a worker by name and reads its answer.',
+          },
+          {
             key: 'maxRounds',
             label: 'Max rounds',
             control: 'number',
             required: false,
             default: 8,
+            help: 'How many times the manager may delegate before it has to conclude.',
           },
         ],
       },
@@ -993,9 +1019,11 @@ export const NODE_CATALOG: NodeCategory[] = [
         description:
           'Run the steps inside once per item of a list, then continue with the collected results.',
         icon: 'Repeat',
-        comingSoon: true,
         inputs: [{ id: 'list', label: 'List', kind: 'json' }],
-        outputs: [{ id: 'results', label: 'Results', kind: 'json' }],
+        outputs: [
+          { id: 'item', label: 'Item', kind: 'json' },
+          { id: 'results', label: 'Results', kind: 'json' },
+        ],
         config: [
           {
             key: 'maxItems',
@@ -1003,6 +1031,26 @@ export const NODE_CATALOG: NodeCategory[] = [
             control: 'number',
             required: false,
             default: 25,
+          },
+          {
+            key: 'onItemError',
+            label: 'If one item fails',
+            control: 'select',
+            required: false,
+            default: 'skip',
+            options: [
+              { value: 'skip', label: 'Skip that item and carry on' },
+              { value: 'stop', label: 'Stop the loop' },
+            ],
+          },
+          {
+            key: 'concurrency',
+            label: 'Items at once',
+            control: 'number',
+            required: false,
+            advanced: true,
+            default: 1,
+            help: `One at a time by default; up to ${FOR_EACH_MAX_CONCURRENCY}.`,
           },
         ],
       },
@@ -1012,7 +1060,6 @@ export const NODE_CATALOG: NodeCategory[] = [
         label: 'Run flow',
         description: 'Use another flow as a step.',
         icon: 'Workflow',
-        comingSoon: true,
         inputs: [{ id: 'input', label: 'Input', kind: 'any' }],
         outputs: [{ id: 'result', label: 'Result', kind: 'any' }],
         config: [
@@ -1023,6 +1070,15 @@ export const NODE_CATALOG: NodeCategory[] = [
             required: true,
             options: [],
           },
+          {
+            key: 'inputMapping',
+            label: 'Inputs',
+            control: 'json',
+            required: false,
+            advanced: true,
+            placeholder: '{ "audience": "{{start.input}}" }',
+            help: 'Fields handed to that flow, where they read as {{start.<name>}}.',
+          },
         ],
       },
       {
@@ -1032,12 +1088,19 @@ export const NODE_CATALOG: NodeCategory[] = [
         description:
           'Have a Dot with an isolated computer do browser, file, or shell work.',
         icon: 'Monitor',
-        comingSoon: true,
         inputs: [CONTEXT_IN],
         outputs: [{ id: 'result', label: 'Result', kind: 'text' }],
         config: [
           { key: 'dot', label: 'Dot', control: 'dot', required: true },
           { key: 'task', label: 'Task', control: 'textarea', required: true },
+          {
+            key: 'startUrl',
+            label: 'Start at',
+            control: 'text',
+            required: false,
+            placeholder: 'https://example.com',
+            help: 'Opened in the computer before the Dot starts.',
+          },
         ],
       },
       {
@@ -1046,7 +1109,6 @@ export const NODE_CATALOG: NodeCategory[] = [
         label: 'Wait',
         description: 'Pause for a duration before continuing.',
         icon: 'Clock',
-        comingSoon: true,
         inputs: [{ id: 'input', label: 'Input', kind: 'any' }],
         outputs: [{ id: 'output', label: 'Output', kind: 'any' }],
         config: [
@@ -1056,6 +1118,7 @@ export const NODE_CATALOG: NodeCategory[] = [
             control: 'number',
             required: true,
             default: 30,
+            help: `Up to ${WAIT_MAX_MINUTES} (24 hours). The run parks and nothing is held open while it waits.`,
           },
         ],
       },
@@ -1146,6 +1209,13 @@ export interface FlowNode {
   collapsed?: boolean;
   width?: number;
   height?: number;
+  /**
+   * Container membership. A node inside a For each body carries the
+   * container's id; its `position` is then relative to the container's
+   * top-left, matching React Flow's parent/child model. Only `for-each`
+   * may be a parent, and containers do not nest.
+   */
+  parentId?: string;
 }
 export interface FlowEdge {
   id: string;
@@ -1303,6 +1373,48 @@ export interface FlowProblem {
 export interface LintContext {
   dots: { id: string }[];
   spaces: { id: string }[];
+  /**
+   * The flow being linted, and every flow a Run flow step could point at.
+   * Both are optional: without them a Run flow step is only checked for a
+   * chosen flow, and the recursion rules below stay quiet rather than
+   * guessing. With them, `flow-cycle` catches a flow that calls itself
+   * directly or through another flow before the run ever starts.
+   */
+  flowId?: string;
+  flows?: { id: string; name?: string; graph: Pick<FlowGraph, 'nodes'> }[];
+}
+/** The flows a graph's Run flow steps point at. */
+export function flowReferences(graph: Pick<FlowGraph, 'nodes'>): string[] {
+  return [
+    ...new Set(
+      graph.nodes
+        .filter((node) => node.type === 'run-flow')
+        .map((node) => String(node.config.flow ?? '').trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+/**
+ * Whether `from` can reach `to` by following Run flow references, `from`
+ * included: the static half of the engine's recursion guard.
+ */
+export function flowReaches(
+  flows: { id: string; graph: Pick<FlowGraph, 'nodes'> }[],
+  from: string,
+  to: string,
+): boolean {
+  const byId = new Map(flows.map((flow) => [flow.id, flow]));
+  const seen = new Set<string>();
+  const queue = [from];
+  while (queue.length) {
+    const current = queue.shift()!;
+    if (current === to) return true;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    const flow = byId.get(current);
+    if (flow) queue.push(...flowReferences(flow.graph));
+  }
+  return false;
 }
 /** Whether adding source->target would create a cycle. */
 export function createsCycle(
@@ -1327,6 +1439,80 @@ export function createsCycle(
     stack.push(...(next.get(current) ?? []));
   }
   return false;
+}
+/**
+ * Why a step cannot sit inside a For each body, or undefined when it can.
+ *
+ * Driven by the same facts the engine reads rather than a hand-kept list: a
+ * body step must hand back an output (`runBodyStep` in
+ * src/server/flow-runner.ts refuses anything else), so every step that can
+ * park — a review, an approval, a Wait — is refused while the flow is drawn
+ * instead of silently producing nothing once per item. Control-flow nodes are
+ * refused for the opposite reason: the body is driven by its container, so a
+ * Start in there is never fired and a Finish in there rewrites the run result
+ * once per item.
+ */
+export function bodyRefusal(
+  node: Pick<FlowNode, 'type' | 'config'>,
+): { level: FlowProblem['level']; reason: string } | undefined {
+  const config = configWithDefaults(node.type, node.config);
+  switch (node.type) {
+    case 'for-each':
+      return { level: 'error', reason: 'For each containers do not nest' };
+    case 'start':
+      return {
+        level: 'error',
+        reason:
+          'a loop body is driven by its container, so a Start in there never fires',
+      };
+    case 'finish':
+      return {
+        level: 'error',
+        reason: 'the run result cannot be rewritten once per item',
+      };
+    case 'human-review':
+      return {
+        level: 'error',
+        reason: 'a loop cannot pause for a person in this release',
+      };
+    case 'wait':
+      return { level: 'error', reason: 'a loop cannot pause partway through' };
+    case 'save-page':
+      return config.review !== false
+        ? {
+            level: 'error',
+            reason:
+              'it asks you before saving; turn "Ask me before saving" off',
+          }
+        : undefined;
+    case 'dot-task':
+      return config.reviewBeforeSave
+        ? {
+            level: 'error',
+            reason:
+              'it asks you before saving; turn "Ask me before saving" off',
+          }
+        : undefined;
+    case 'mcp-tool': {
+      const approval = String(config.approval ?? 'inherit');
+      if (approval === 'always')
+        return {
+          level: 'error',
+          reason:
+            'it always asks before running; set its approval to "Never ask"',
+        };
+      // 'inherit' depends on the tool, which only the server can resolve.
+      return approval === 'inherit'
+        ? {
+            level: 'warning',
+            reason:
+              'it will fail for every item if the chosen tool asks before running; set its approval to "Never ask"',
+          }
+        : undefined;
+    }
+    default:
+      return undefined;
+  }
 }
 export function lintFlow(
   graph: FlowGraph,
@@ -1465,6 +1651,122 @@ export function lintFlow(
         message: `${name}: a step that asks you first cannot run once per item. Turn one of them off.`,
         nodeId: node.id,
       });
+    // Honesty about the one review setting the engine does not read yet: a
+    // review with no decision parks indefinitely, so a flow that counted on
+    // the timeout hears about it while it is drawn.
+    if (node.type === 'human-review' && Number(config.timeoutHours) > 0)
+      problems.push({
+        level: 'warning',
+        code: 'review-timeout-unavailable',
+        message: `${name}: the review timeout is not enforced yet, so this run waits until someone decides.`,
+        nodeId: node.id,
+      });
+    if (node.type === 'wait' && Number(config.minutes) > WAIT_MAX_MINUTES)
+      problems.push({
+        level: 'error',
+        code: 'wait-too-long',
+        message: `${name}: a Wait can pause for at most ${WAIT_MAX_MINUTES} minutes (24 hours).`,
+        nodeId: node.id,
+      });
+    if (node.type === 'for-each') {
+      const body = bodyNodes(graph, node.id);
+      if (node.parentId)
+        problems.push({
+          level: 'error',
+          code: 'nested-container',
+          message: `${name}: a For each cannot sit inside another For each.`,
+          nodeId: node.id,
+        });
+      else if (!body.length)
+        problems.push({
+          level: 'error',
+          code: 'empty-body',
+          message: `${name} has no steps inside it. Drop the steps to repeat into the container.`,
+          nodeId: node.id,
+        });
+      for (const inner of body) {
+        const refusal = bodyRefusal(inner);
+        if (refusal)
+          problems.push({
+            level: refusal.level,
+            code: 'body-not-supported',
+            message: `${nodeLabel(inner)} cannot run inside ${name}: ${refusal.reason}.`,
+            nodeId: inner.id,
+          });
+        // The per-item fan-out lives in the outer scheduler, so a body step
+        // asking for it would have the setting quietly dropped.
+        if (configWithDefaults(inner.type, inner.config).perItem)
+          problems.push({
+            level: 'error',
+            code: 'body-not-supported',
+            message: `${nodeLabel(inner)} cannot run inside ${name}: a step in a loop already runs once per item, so "once per item" cannot apply again.`,
+            nodeId: inner.id,
+          });
+      }
+    }
+    // A membership no container drives is a step the engine skips in silence,
+    // so the canvas refuses it rather than waiting for the save to 400.
+    if (
+      node.parentId &&
+      node.type !== 'for-each' &&
+      !canContain(graph, node.parentId)
+    )
+      problems.push({
+        level: 'error',
+        code: 'invalid-container',
+        message: `${name} sits inside ${
+          byId.get(node.parentId)
+            ? nodeLabel(byId.get(node.parentId)!)
+            : 'a step'
+        }, which is not a For each. Only a For each can hold steps.`,
+        nodeId: node.id,
+      });
+    // Finish and Send message can post back into the Slack thread that
+    // started the run, which only exists when a Slack Start fired it.
+    if (
+      ((node.type === 'finish' && config.replyToTrigger) ||
+        (node.type === 'send-message' && config.destination === 'thread')) &&
+      !starts.some(
+        (start) =>
+          configWithDefaults('start', start.config).trigger === 'slack',
+      )
+    )
+      problems.push({
+        level: 'warning',
+        code: 'reply-without-slack-start',
+        message: `${name} replies in the Slack thread that started the flow, but no Start of this flow listens for a Slack mention, so there is no such thread.`,
+        nodeId: node.id,
+      });
+    if (node.type === 'run-flow') {
+      const target = String(config.flow ?? '').trim();
+      const others = context.flows;
+      if (target && others && !others.some((flow) => flow.id === target))
+        problems.push({
+          level: 'error',
+          code: 'missing-flow',
+          message: `${name}: the chosen flow no longer exists.`,
+          nodeId: node.id,
+        });
+      else if (target && context.flowId && target === context.flowId)
+        problems.push({
+          level: 'error',
+          code: 'flow-cycle',
+          message: `${name}: a flow cannot run itself.`,
+          nodeId: node.id,
+        });
+      else if (
+        target &&
+        others &&
+        context.flowId &&
+        flowReaches(others, target, context.flowId)
+      )
+        problems.push({
+          level: 'error',
+          code: 'flow-cycle',
+          message: `${name}: that flow runs this one again, directly or through another flow.`,
+          nodeId: node.id,
+        });
+    }
     const known = new Set(
       upstreamRefs(graph, node.id).map((ref) =>
         ref.token.replace(/[{}\s]/g, ''),
@@ -1487,7 +1789,14 @@ export function lintFlow(
         message: `${name} has no incoming connection and will never run.`,
         nodeId: node.id,
       });
-    if (node.type !== 'finish' && nodeOutputs(node).length && !outgoing.length)
+    // A step at the end of a For each body is not a dead end: the container
+    // collects its result for the Results port.
+    if (
+      node.type !== 'finish' &&
+      !node.parentId &&
+      nodeOutputs(node).length &&
+      !outgoing.length
+    )
       problems.push({
         level: 'warning',
         code: 'dead-end',
@@ -1527,6 +1836,21 @@ export function lintFlow(
         message: `${nodeLabel(source)} sends ${out.kind} but ${nodeLabel(target)} expects ${inp.kind}.`,
         edgeId: edge.id,
       });
+    // A For each body is its own little graph: the only way in is the
+    // container's Item port and the only way out is its Results port, which
+    // the container fills itself. Anything else would be a step the outer
+    // readiness pass can neither schedule nor settle.
+    if (source.parentId !== target.parentId) {
+      const entering =
+        source.id === target.parentId && edge.sourceHandle === 'item';
+      if (!entering)
+        problems.push({
+          level: 'error',
+          code: 'container-boundary',
+          message: `The connection between ${nodeLabel(source)} and ${nodeLabel(target)} crosses the edge of a For each. Steps inside only connect to each other, to the container's Item, and out through its Results.`,
+          edgeId: edge.id,
+        });
+    }
   }
   const inputCounts = new Map<string, number>();
   for (const edge of graph.edges) {
@@ -1724,8 +2048,12 @@ export function upstreamRefs(graph: FlowGraph, nodeId: string): UpstreamRef[] {
 export function runOrder(
   graph: FlowGraph,
 ): { nodeId: string; step: number; wave: number }[] {
+  // Body steps are not outer steps: the container runs the whole body to
+  // completion once per item before its Results output exists, so numbering
+  // them beside the step fed by Results would describe an order the engine
+  // never follows (see pump in src/server/flow-runner.ts, which skips them).
   const executable = graph.nodes.filter(
-    (node) => !NODE_SPECS[node.type]?.decorative,
+    (node) => !NODE_SPECS[node.type]?.decorative && !node.parentId,
   );
   const ids = new Set(executable.map((node) => node.id));
   const remaining = new Map<string, number>();
@@ -1764,6 +2092,30 @@ export function runOrder(
     wave += 1;
   }
   return result;
+}
+/** Nodes inside a container, in stable order. */
+export function bodyNodes(graph: FlowGraph, containerId: string): FlowNode[] {
+  return graph.nodes.filter((node) => node.parentId === containerId);
+}
+/** Containers cannot nest and only `for-each` may hold a body. */
+export function canContain(graph: FlowGraph, containerId: string) {
+  const container = graph.nodes.find((node) => node.id === containerId);
+  return container?.type === 'for-each' && !container.parentId;
+}
+/**
+ * Absolute canvas position, resolving one level of container offset.
+ * Edges and layout work in absolute space; storage keeps child positions
+ * relative so moving a container moves its body with it.
+ */
+export function absolutePosition(graph: FlowGraph, node: FlowNode) {
+  if (!node.parentId) return node.position;
+  const parent = graph.nodes.find((item) => item.id === node.parentId);
+  return parent
+    ? {
+        x: parent.position.x + node.position.x,
+        y: parent.position.y + node.position.y,
+      }
+    : node.position;
 }
 export function incomingCount(graph: FlowGraph, nodeId: string) {
   return graph.edges.filter((edge) => edge.target === nodeId).length;

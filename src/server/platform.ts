@@ -1,6 +1,7 @@
 import { ComputerService } from './computer-service.js';
 import { ConnectionService } from './connections.js';
 import { FlowRunner } from './flow-runner.js';
+import { FlowTriggerBridge, publishedFlows } from './flow-triggers.js';
 import { PageService } from './page-service.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -30,6 +31,8 @@ export class Platform {
   readonly computers: ComputerService;
   readonly connections: ConnectionService;
   readonly runner: FlowRunner;
+  /** Slack mentions and page writes that start published flows. */
+  readonly triggers: FlowTriggerBridge;
   readonly intelligence?: CopilotKitIntelligence;
   readonly handler?: CopilotHonoApp;
   constructor(
@@ -45,6 +48,23 @@ export class Platform {
     );
     this.connections = new ConnectionService(workspace.connections);
     this.runner = new FlowRunner(this);
+    this.triggers = new FlowTriggerBridge({
+      published: () => publishedFlows(workspace.flows),
+      paused: () => store.settings().paused,
+      fire: (flowId, nodeId, trigger) =>
+        this.runner.fire(flowId, nodeId, trigger),
+      // A page written while the engine is working on one of the flow's own
+      // runs is that run's own output, so it never starts the flow again.
+      // Deliberately not every active run: a run parked on a Wait or a review
+      // holds no worker, and counting it would silence the trigger for as
+      // long as the park lasts.
+      busyFlows: () => workspace.runs.busyFlowIds(),
+      // What bounds a ring of page-saving flows: a write carries the run
+      // that made it, and no flow in that run's chain fires from it.
+      triggerChain: (runId) => workspace.runs.triggerChain(runId),
+      attachReply: (runId, reply) => this.runner.attachReply(runId, reply),
+    });
+    workspace.pages.onWrite((write) => this.triggers.pageWritten(write));
     this.pages = new PageService(workspace, () => {
       this.requireReady();
       return this.intelligence!;
@@ -69,6 +89,7 @@ export class Platform {
         config,
         ownerId: workspace.ownerId,
         paused: () => store.settings().paused,
+        bridge: this.triggers,
         agent: () =>
           new DotAgent(
             store,

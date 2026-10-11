@@ -31,9 +31,12 @@ export function flowRunRoutes(platform: Platform) {
   const flows = platform.workspace.flows;
   const runs = platform.workspace.runs;
   const runner = platform.runner;
-  const lintContext = () => ({
+  /** With `flowId` and the other graphs, a Run flow loop is refused here too. */
+  const lintContext = (flowId?: string) => ({
     dots: platform.workspace.dots(),
     spaces: platform.workspace.spaces(),
+    flowId,
+    flows: flows.graphs(),
   });
 
   // Fixed paths come before the parameterised ones so "runs" and
@@ -128,7 +131,7 @@ export function flowRunRoutes(platform: Platform) {
     if (!data.success) return c.json({ error: 'Invalid run request.' }, 400);
     const flow = flows.get(c.req.param('id'));
     if (!flow) return c.json({ error: 'Flow not found.' }, 404);
-    const problems = lintFlow(flow.graph, lintContext()).filter(
+    const problems = lintFlow(flow.graph, lintContext(flow.id)).filter(
       (problem) => problem.level === 'error',
     );
     if (problems.length)
@@ -162,6 +165,10 @@ export function flowRunRoutes(platform: Platform) {
       );
     if (!trigger.active)
       return c.json({ error: 'This webhook is paused.' }, 409);
+    // `fire` refuses a paused workspace too; saying so here keeps it apart
+    // from "the published version has no such Start", which is a 404.
+    if (platform.store.settings().paused)
+      return c.json({ error: 'The workspace is paused.' }, 409);
     if (trigger.config.webhookAuth !== 'none') {
       const token = runs.webhookToken(flow.id);
       if (!token || c.req.header(WEBHOOK_TOKEN_HEADER) !== token)

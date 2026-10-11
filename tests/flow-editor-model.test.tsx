@@ -19,6 +19,7 @@ import {
   NodePanel,
   acceptsKind,
   catalogGroups,
+  categorySoon,
   filterGroups,
   flattenResults,
   isComingSoon,
@@ -175,7 +176,7 @@ it('keys problem rows uniquely even when a node repeats a code', () => {
   warn.mockRestore();
 });
 
-it('lists real Dots first in the Dots category and keeps coming-soon steps', () => {
+it('lists real Dots first and dims only what the catalog still flags', () => {
   const groups = catalogGroups(workspace);
   const dots = groups.find((group) => group.category.id === 'dots')!;
   expect(dots.items[0]).toMatchObject({
@@ -185,8 +186,14 @@ it('lists real Dots first in the Dots category and keeps coming-soon steps', () 
     dot,
   });
   expect(dots.items.slice(1).every((item) => !item.dot)).toBe(true);
-  const soon = groups.find((group) => group.category.id === 'team')!;
-  expect(soon.items.every(isComingSoon)).toBe(true);
+  // Dot team, For each, Run flow, Computer task and Wait all execute now, so
+  // the Advanced group is addable and nothing in the catalog is coming soon.
+  const advanced = groups.find((group) => group.category.id === 'team')!;
+  expect(advanced.items.some(isComingSoon)).toBe(false);
+  expect(categorySoon(advanced)).toBe(false);
+  expect(groups.flatMap((group) => group.items).filter(isComingSoon)).toEqual(
+    [],
+  );
   expect(groups.map((group) => group.category.id)).toEqual(
     NODE_CATALOG.map((category) => category.id),
   );

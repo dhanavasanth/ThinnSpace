@@ -40,6 +40,7 @@ import {
   GitFork,
   Globe,
   LoaderCircle,
+  LogOut,
   Merge,
   Monitor,
   Play,
@@ -63,6 +64,7 @@ import {
   PORT_COLORS,
   configWithDefaults,
   nodeCategory,
+  optionUnavailable,
   nodeInputs,
   nodeLabel,
   nodeOutputs,
@@ -74,6 +76,7 @@ import type { Dot } from '../../shared/types';
 import { Mascot } from '../Mascot';
 import type { FlowNodeData } from './contract';
 import { describeSchedule } from './format';
+import { CONTAINER_MIN, isContainer } from './flow-history';
 
 export type EditorNode = Node<FlowNodeData, 'flow'>;
 /** Server caps for what a card stores; mirrored here so saves never 400. */
@@ -99,6 +102,14 @@ export interface EditorActions {
     kind: PortKind,
     screen: { x: number; y: number },
   ) => void;
+  /** Take a step out of the loop it sits in, keeping its place on the canvas. */
+  detach?: (id: string) => void;
+  /**
+   * The container a card being dragged would join if it were dropped now.
+   * Adoption is decided by the card's centre, so near a container's edge the
+   * outcome is not readable from the screen without this.
+   */
+  dropHost?: string | null;
 }
 export const EditorActionsContext = createContext<EditorActions | null>(null);
 
@@ -141,6 +152,14 @@ export function nodeIcon(name: string | undefined): LucideIcon {
 }
 export function categoryColor(type: string) {
   return nodeCategory(type)?.color ?? '#94a3b8';
+}
+/**
+ * A container's colour. Now that every node filed under Advanced ships, the
+ * category carries a real colour and a container reads like its own kind on
+ * the card, in the palette and on the minimap alike — no special case.
+ */
+export function containerColor(type: string) {
+  return categoryColor(type);
 }
 /** First sentence of a Dot's instructions, kept short. */
 export function dotRole(dot: Dot | undefined) {
@@ -250,12 +269,26 @@ export function describeNode(
     }
     case 'send-message':
       summary = firstLine(c.message, 'What should be sent?');
-      // Slack delivery is not wired up yet; say so rather than promise it.
-      chips.push(c.destination === 'inbox' ? 'Run log' : 'Coming soon');
+      // Replying in the thread that started the run works; posting into an
+      // arbitrary channel does not, so say so rather than promise it.
+      chips.push(
+        optionUnavailable('send-message', 'destination', c.destination)
+          ? 'Coming soon'
+          : optionLabel('send-message', 'destination', c.destination),
+      );
       break;
     case 'branch':
       summary = `${String(c.field || 'value')} ${optionLabel('branch', 'operator', c.operator)}${c.operator === 'empty' ? '' : ` ${String(c.value ?? '')}`}`;
       break;
+    case 'for-each': {
+      summary = 'Runs the steps inside once for every item of the list';
+      const max = Number(c.maxItems);
+      if (Number.isFinite(max) && max > 0) chips.push(`Max ${max} items`);
+      const at = Number(c.concurrency);
+      if (Number.isFinite(at) && at > 1) chips.push(`${at} at a time`);
+      else if (c.concurrency) chips.push('One at a time');
+      break;
+    }
     case 'human-review':
       summary = firstLine(c.message, 'What should the reviewer look at?');
       chips.push(optionLabel('human-review', 'actions', c.actions));
@@ -323,12 +356,15 @@ function CardToolbar({
   id,
   visible,
   isStart,
+  member,
   enter,
   leave,
 }: {
   id: string;
   visible: boolean;
   isStart: boolean;
+  /** Inside a For each: the toolbar offers a way back out of the body. */
+  member?: boolean;
   enter: () => void;
   leave: () => void;
 }) {
@@ -346,6 +382,16 @@ function CardToolbar({
       onMouseEnter={enter}
       onMouseLeave={leave}
     >
+      {member && (
+        <button
+          type="button"
+          aria-label="Move out of the loop"
+          title="Move out of the loop"
+          onClick={() => actions?.detach?.(id)}
+        >
+          <LogOut size={13} />
+        </button>
+      )}
       <button
         type="button"
         aria-label="Duplicate"
@@ -482,7 +528,204 @@ function OutputPort({
   );
 }
 
-function StepCard({ id, data, selected }: NodeProps<EditorNode>) {
+/**
+ * A For each container: the dashed body the steps of one iteration live in,
+ * drawn behind them (toEditorNode gives it a lower z-index). Its list input
+ * and results output sit on the outer edges beside the header, and the
+ * per-item output sits inside the body at the left, the way n8n and Langflow
+ * draw a loop. The children are ordinary cards React Flow renders on top.
+ */
+function ContainerCard({ id, data, selected }: NodeProps<EditorNode>) {
+  const actions = useContext(EditorActionsContext);
+  const preview = useContext(PreviewContext);
+  const previewStep = preview?.get(id);
+  const { hovered, enter, leave } = useHoverIntent();
+  const { node, problems, status } = data;
+  const spec = NODE_SPECS[node.type];
+  const Icon = nodeIcon(spec?.icon);
+  const color = containerColor(node.type);
+  const renaming = actions?.renamingId === id;
+  const title = nodeLabel(node);
+  const { summary, chips } = describeNode(node);
+  const errors = problems.filter((p) => p.level === 'error').length;
+  const badge = STATUS_BADGE[status];
+  const inside = useStore(
+    (state) =>
+      state.nodes.filter((item) => (item as EditorNode).parentId === id).length,
+  );
+  const inputs = nodeInputs(node);
+  const outputs = nodeOutputs(node);
+  // The per-item output is declared `item` by the catalog; everything else
+  // leaves the loop and belongs on the right edge.
+  const itemPort = outputs.find((port) => port.id === 'item');
+  const outerPorts = outputs.filter((port) => port.id !== 'item');
+  const style = useMemo<CSSProperties>(
+    () => ({ ['--fnode-color' as string]: color }),
+    [color],
+  );
+  const finishRename = (value: string) => {
+    actions?.rename(id, value);
+    actions?.setRenamingId(null);
+  };
+  return (
+    <div
+      className={`fcontainer${selected ? ' selected' : ''}${
+        spec?.comingSoon ? ' is-soon' : ''
+      }${actions?.dropHost === id ? ' drop-target' : ''}${
+        previewStep ? ` previewing wave-${previewStep.wave % WAVE_TINTS}` : ''
+      }`}
+      style={style}
+      data-status={status}
+      data-step={previewStep?.step}
+      onMouseEnter={enter}
+      onMouseLeave={leave}
+    >
+      {/* Dragging a top or left handle moves the container's origin: React
+          Flow corrects its children's relative positions in the same batch
+          of changes, so the steps inside hold their place on the canvas and
+          the container cannot be shrunk smaller than the body it holds. The
+          whole resize is recorded as one undo step when it ends. */}
+      <NodeResizer
+        minWidth={CONTAINER_MIN.width}
+        minHeight={CONTAINER_MIN.height}
+        isVisible={selected}
+        lineClassName="fcontainer-resize-line"
+        handleClassName="fcontainer-resize-handle"
+        onResizeEnd={() => actions?.commit()}
+      />
+      <CardToolbar
+        id={id}
+        visible={selected || hovered}
+        isStart={false}
+        enter={enter}
+        leave={leave}
+      />
+      <div className="fcontainer-head">
+        <span className="fcontainer-glyph" aria-hidden="true">
+          <Icon size={18} strokeWidth={1.9} />
+        </span>
+        <span className="fcontainer-titles">
+          {renaming ? (
+            <input
+              className="fnode-rename nodrag"
+              aria-label="Node name"
+              autoFocus
+              maxLength={NODE_LABEL_MAX}
+              defaultValue={node.label ?? ''}
+              placeholder={spec?.label ?? node.type}
+              onFocus={(event) => event.currentTarget.select()}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter')
+                  finishRename(event.currentTarget.value);
+                if (event.key === 'Escape') actions?.setRenamingId(null);
+              }}
+              onBlur={(event) => finishRename(event.currentTarget.value)}
+            />
+          ) : (
+            <strong
+              className="fcontainer-label"
+              title="Double-click to rename"
+              onDoubleClick={() => actions?.setRenamingId(id)}
+            >
+              {title}
+            </strong>
+          )}
+          <span className="fcontainer-sub" title={summary}>
+            {renderTokens(summary)}
+          </span>
+        </span>
+        <span className="fcontainer-meta">
+          {chips.slice(0, CHIP_MAX).map((chip) => (
+            <span className="fnode-chip" key={chip} title={chip}>
+              {chip}
+            </span>
+          ))}
+          {problems.length > 0 && (
+            <span
+              className={`fnode-problem ${errors ? 'error' : 'warning'}`}
+              role="img"
+              aria-label={`${problems.length} ${problems.length === 1 ? 'problem' : 'problems'}`}
+              title={problems.map((p) => p.message).join('\n')}
+            />
+          )}
+          {badge && (
+            <span
+              className={`fnode-status ${status}`}
+              role="img"
+              aria-label={badge.label}
+              title={badge.label}
+            >
+              <badge.Icon size={12} strokeWidth={2.5} />
+            </span>
+          )}
+        </span>
+      </div>
+      <div className="fcontainer-body">
+        {inside === 0 && (
+          <span className="fcontainer-empty">
+            Drag the steps that run for each item in here
+          </span>
+        )}
+      </div>
+      {inputs.length > 0 && (
+        <div className="fcontainer-ports in">
+          {inputs.map((port) => (
+            <InputPort key={port.id} port={port} labelled />
+          ))}
+        </div>
+      )}
+      {outerPorts.length > 0 && (
+        <div className="fcontainer-ports out">
+          {outerPorts.map((port) => (
+            <OutputPort key={port.id} id={id} port={port} labelled />
+          ))}
+        </div>
+      )}
+      {itemPort && (
+        <span className="fcontainer-item">
+          {/* Declared as a right-side handle although it sits at the body's
+              left edge, so the line to the first step inside leaves towards
+              it instead of looping back around the container. */}
+          <Handle
+            type="source"
+            position={Position.Right}
+            id={itemPort.id}
+            className="fnode-handle out"
+            style={{
+              ...PORT_STYLE[itemPort.kind],
+              position: 'relative',
+              top: 'auto',
+              right: 'auto',
+              transform: 'none',
+            }}
+            aria-label={`${itemPort.label} output (${itemPort.kind})`}
+            title={`${itemPort.label} · ${itemPort.kind}`}
+          />
+          <span className="fnode-port-label">{itemPort.label}</span>
+          <button
+            type="button"
+            className="fnode-out-add nodrag"
+            aria-label={`Add a step inside ${title}`}
+            title="Add a step inside the loop"
+            onClick={(event) => {
+              // React Flow's wrapper would select the container, and a
+              // selection closes the picker this is opening.
+              event.stopPropagation();
+              actions?.addFrom(id, itemPort.id, itemPort.kind, {
+                x: event.clientX,
+                y: event.clientY,
+              });
+            }}
+          >
+            <Plus size={10} />
+          </button>
+        </span>
+      )}
+    </div>
+  );
+}
+
+function StepCard({ id, data, selected, parentId }: NodeProps<EditorNode>) {
   const actions = useContext(EditorActionsContext);
   const preview = useContext(PreviewContext);
   const previewStep = preview?.get(id);
@@ -546,6 +789,7 @@ function StepCard({ id, data, selected }: NodeProps<EditorNode>) {
         id={id}
         visible={selected || hovered}
         isStart={isStart}
+        member={!!parentId}
         enter={enter}
         leave={leave}
       />
@@ -679,9 +923,8 @@ function StepCard({ id, data, selected }: NodeProps<EditorNode>) {
 export const FlowNodeCard = memo(function FlowNodeCard(
   props: NodeProps<EditorNode>,
 ) {
-  return NODE_SPECS[props.data.node.type]?.decorative ? (
-    <NoteCard {...props} />
-  ) : (
-    <StepCard {...props} />
-  );
+  const { type } = props.data.node;
+  if (NODE_SPECS[type]?.decorative) return <NoteCard {...props} />;
+  if (isContainer(type)) return <ContainerCard {...props} />;
+  return <StepCard {...props} />;
 });

@@ -10,6 +10,7 @@ import { requestedUrls } from './research.js';
 import { PageError, type Page } from './pages.js';
 import {
   NODE_SPECS,
+  WAIT_MAX_MINUTES,
   listValues,
   nodeOutputs,
   type FlowNode,
@@ -26,6 +27,13 @@ import type {
 export const SETUP_REQUIRED_MESSAGE =
   'Setup required: connect Intelligence and a model in Settings to run Dot steps.';
 export const SLACK_UNAVAILABLE_MESSAGE = 'Slack delivery is not available yet.';
+/**
+ * A Computer task on a server with no computer supervisor. Checked before
+ * anything else the step needs, so the owner is told what is missing rather
+ * than hearing about Intelligence or a permission first.
+ */
+export const COMPUTER_UNAVAILABLE_MESSAGE =
+  'Computer is not configured: set the computer supervisor URL and tokens to run Computer task steps.';
 /** Context payloads longer than this are cut before reaching a Dot. */
 export const CONTEXT_CHAR_LIMIT = 8000;
 
@@ -57,6 +65,13 @@ export interface StepContext {
   message(text: string): void;
   /** Records a Finish node's part of the run result. */
   setResult(label: string, part: Omit<RunResult, 'parts'>): void;
+  /**
+   * Posts text back into the conversation that triggered this run — today
+   * the Slack thread a mention came from. Resolves false when the run has no
+   * such conversation (a manual run, or one rehydrated after a restart), so
+   * the caller can say so rather than fail.
+   */
+  replyToTrigger(text: string): Promise<boolean>;
   /** A conversation for a Dot step, honouring its conversation mode. */
   thread(
     dotId: string,
@@ -66,7 +81,24 @@ export interface StepContext {
   ): Promise<string>;
   /** One Dot turn, counted against the run's Dot-turn limit. */
   turn(threadId: string, prompt: string): Promise<string>;
+  /**
+   * Runs another flow as a child of this run (Run flow). The engine owns the
+   * recursion and depth guards, creates the child run row with this run as
+   * its parent, and cancels the child when this step is aborted.
+   */
+  child(
+    flowId: string,
+    input: string,
+    fields?: Record<string, unknown>,
+  ): Promise<ChildRun>;
   platform: Platform;
+}
+/** What a child run left behind for the Run flow step that started it. */
+export interface ChildRun {
+  runId: string;
+  flowName: string;
+  text: string;
+  sources: RunResult['sources'];
 }
 export interface PendingApproval {
   kind: FlowApproval['kind'];
@@ -81,7 +113,13 @@ export type StepOutcome =
       input?: unknown;
       threadId?: string;
     }
-  | { kind: 'wait'; approval: PendingApproval; input?: unknown };
+  | { kind: 'wait'; approval: PendingApproval; input?: unknown }
+  /**
+   * Park until `until` and carry on then (Wait). Like an approval it holds
+   * no worker: the step row and the run go to waiting, the wake time is
+   * persisted, and the scheduler resumes the step when it comes due.
+   */
+  | { kind: 'sleep'; until: number; input?: unknown };
 export interface Decision {
   action: ApprovalAction;
   feedback: string | null;
@@ -95,6 +133,8 @@ export interface Executor {
     approval: FlowApproval,
     decision: Decision,
   ): Promise<StepOutput>;
+  /** The output of a `sleep` step once its wake time arrived. */
+  wake?(ctx: StepContext): Promise<StepOutput>;
 }
 
 // Value rendering ---------------------------------------------------------
@@ -416,26 +456,32 @@ async function performSave(
   content: string,
 ) {
   const pages = ctx.platform.workspace.pages;
+  // Every write a step makes is attributed to its run, so a page Start can
+  // tell a write this run's own chain caused from one a person made.
   if (target.mode === 'create')
     return pageRef(
-      pages.create(target.spaceId, {
-        title: target.title,
-        content,
-        parentId: target.parentId,
-      }),
+      pages.attribute(ctx.runId, () =>
+        pages.create(target.spaceId, {
+          title: target.title,
+          content,
+          parentId: target.parentId,
+        }),
+      ),
     );
   if (!target.pageId) throw new Error('Choose a page to update.');
   for (let attempt = 1; ; attempt++) {
     const page = pages.get(target.spaceId, target.pageId);
     try {
       return pageRef(
-        pages.update(target.spaceId, page.id, {
-          content:
-            target.mode === 'append'
-              ? `${page.content.trimEnd()}\n\n${content}`.trim()
-              : content,
-          expectedRevision: page.revision,
-        }),
+        pages.attribute(ctx.runId, () =>
+          pages.update(target.spaceId, page.id, {
+            content:
+              target.mode === 'append'
+                ? `${page.content.trimEnd()}\n\n${content}`.trim()
+                : content,
+            expectedRevision: page.revision,
+          }),
+        ),
       );
     } catch (error) {
       const conflict = error instanceof PageError && error.status === 409;
@@ -598,21 +644,29 @@ function renderDeep(ctx: StepContext, value: unknown): unknown {
     );
   return value;
 }
-/** Tool arguments from the node's JSON, with chips substituted first. */
-export function toolArguments(ctx: StepContext): Record<string, unknown> {
-  const raw = ctx.config.arguments;
+/** A json config field read as an object, with chips substituted first. */
+function jsonConfig(
+  ctx: StepContext,
+  key: string,
+  label: string,
+): Record<string, unknown> {
+  const raw = ctx.config[key];
   let value: unknown;
   if (typeof raw === 'string') {
     if (!raw.trim()) return {};
     try {
       value = JSON.parse(ctx.render(raw));
     } catch {
-      throw new Error('Arguments must be a JSON object.');
+      throw new Error(`${label} must be a JSON object.`);
     }
   } else value = renderDeep(ctx, raw ?? {});
   if (!value || typeof value !== 'object' || Array.isArray(value))
-    throw new Error('Arguments must be a JSON object.');
+    throw new Error(`${label} must be a JSON object.`);
   return value as Record<string, unknown>;
+}
+/** Tool arguments from the node's JSON, with chips substituted first. */
+export function toolArguments(ctx: StepContext): Record<string, unknown> {
+  return jsonConfig(ctx, 'arguments', 'Arguments');
 }
 function resolveTool(ctx: StepContext) {
   const dotId = String(ctx.config.dot ?? '');
@@ -691,12 +745,28 @@ const mcpTool: Executor = {
 
 const sendMessage: Executor = {
   async run(ctx) {
-    if (ctx.config.destination !== 'inbox')
+    const destination = String(ctx.config.destination ?? 'inbox');
+    // Posting into an arbitrary Slack channel still needs an API the
+    // Channels SDK does not expose; replying in the thread that started the
+    // run does not, because the trigger handed the run that thread.
+    if (destination !== 'inbox' && destination !== 'thread')
       throw new Error(SLACK_UNAVAILABLE_MESSAGE);
     const text =
       ctx.render(String(ctx.config.message ?? '')).trim() ||
       inputText(ctx, 'content');
     if (!text) throw new Error('There is nothing to send.');
+    if (destination === 'thread') {
+      if (!(await ctx.replyToTrigger(text)))
+        throw new Error(
+          'This run was not started by a Slack mention, so there is no thread to post in.',
+        );
+      ctx.log(`${ctx.label}: replied in the Slack thread.`);
+      return {
+        kind: 'output',
+        output: { sent: { kind: 'json', value: { destination, text } } },
+        input: text,
+      };
+    }
     ctx.message(text);
     return {
       kind: 'output',
@@ -826,11 +896,10 @@ const humanReview: Executor = {
         ctx.render(String(ctx.config.pageTitle ?? '')).trim() ||
         firstLine(text) ||
         'Untitled';
-      const page = ctx.platform.workspace.pages.create(spaceId, {
-        title,
-        content: text,
-        parentId: null,
-      });
+      const pages = ctx.platform.workspace.pages;
+      const page = pages.attribute(ctx.runId, () =>
+        pages.create(spaceId, { title, content: text, parentId: null }),
+      );
       ctx.log(`${ctx.label}: saved the approved draft as "${page.title}".`);
     }
     return { approved: { kind: 'text', value: text } };
@@ -875,9 +944,306 @@ const finish: Executor = {
       text,
       sources,
     });
+    if (ctx.config.replyToTrigger) {
+      if (!text)
+        ctx.log(`${ctx.label}: nothing to reply with, so nothing was posted.`);
+      else if (!(await ctx.replyToTrigger(text)))
+        ctx.log(
+          `${ctx.label}: this run was not started by a Slack mention, so there is no thread to reply in.`,
+        );
+    }
     return { kind: 'output', output: {}, input: text };
   },
 };
+// Advanced ----------------------------------------------------------------
+
+/** Minutes a Wait pauses for: never negative, never over the catalog's cap. */
+export function waitMinutes(config: Record<string, unknown>): number {
+  const asked = Number(config.minutes);
+  if (!Number.isFinite(asked) || asked <= 0) return 0;
+  return Math.min(Math.round(asked), WAIT_MAX_MINUTES);
+}
+const wait: Executor = {
+  async run(ctx) {
+    const minutes = waitMinutes(ctx.config);
+    ctx.log(
+      minutes
+        ? `${ctx.label}: pausing for ${minutes} minute${minutes === 1 ? '' : 's'}; nothing is held open while it waits.`
+        : `${ctx.label}: no pause set; continuing as soon as the scheduler looks.`,
+    );
+    return {
+      kind: 'sleep',
+      until: Date.now() + minutes * 60_000,
+      input: { minutes },
+    };
+  },
+  /** Whatever arrived leaves again: a Wait only delays the value. */
+  async wake(ctx) {
+    const pass = ctx.inputs.input?.[0];
+    return {
+      output: { kind: pass?.kind ?? 'any', value: pass?.value ?? '' },
+    };
+  },
+};
+
+const runFlow: Executor = {
+  async run(ctx) {
+    const flowId = String(ctx.config.flow ?? '').trim();
+    if (!flowId) throw new Error('Choose a flow to run.');
+    const fields = jsonConfig(ctx, 'inputMapping', 'Inputs');
+    const input =
+      typeof fields.input === 'string'
+        ? fields.input
+        : portText(ctx.inputs.input?.[0]);
+    const child = await ctx.child(
+      flowId,
+      input,
+      Object.keys(fields).length ? fields : undefined,
+    );
+    return {
+      kind: 'output',
+      output: { result: { kind: 'any', value: child.text } },
+      input: { flow: child.flowName, input, fields },
+    };
+  },
+};
+
+/**
+ * For each is the one container: its body is every node whose `parentId` is
+ * the container, and only the engine can schedule those. The executor exists
+ * so an unexpected call says something true instead of "not available yet".
+ */
+const forEach: Executor = {
+  async run() {
+    throw new Error('For each is run by the engine, not as an ordinary step.');
+  },
+};
+
+function slugOf(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+/** One specialist Dot a Dot team manager may delegate to. */
+export interface TeamWorker {
+  dotId: string;
+  name: string;
+  /** When the manager should ask this worker, in the owner's words. */
+  when: string;
+  /** The name the manager delegates with: `ask_<slug>`. */
+  slug: string;
+}
+/** The team roster, read from the node's json rows and checked against the workspace. */
+export function teamWorkers(ctx: StepContext): TeamWorker[] {
+  const raw = ctx.config.workers;
+  let rows: unknown = raw;
+  if (typeof raw === 'string') {
+    const parsed = raw.trim() ? parseJsonAnswer(raw) : { error: 'empty' };
+    if (parsed.error)
+      throw new Error('Workers must be JSON rows of { dotId, when }.');
+    rows = parsed.value;
+  }
+  if (!Array.isArray(rows) || !rows.length)
+    throw new Error('Add at least one worker Dot to this team.');
+  const used = new Set<string>();
+  return rows.map((row) => {
+    const record = (row && typeof row === 'object' ? row : {}) as Record<
+      string,
+      unknown
+    >;
+    const dotId = String(record.dotId ?? record.dot ?? '').trim();
+    const dot = dotId ? ctx.platform.workspace.dot(dotId) : undefined;
+    if (!dot)
+      throw new Error(
+        `A worker Dot in this team no longer exists${dotId ? ` (${dotId})` : ''}.`,
+      );
+    const base = slugOf(dot.name) || 'worker';
+    let slug = base;
+    for (let n = 2; used.has(slug); n++) slug = `${base}_${n}`;
+    used.add(slug);
+    return {
+      dotId: dot.id,
+      name: dot.name,
+      when: String(record.when ?? '').trim(),
+      slug,
+    };
+  });
+}
+/** The manager's answer read as a delegation, or undefined when it is the result. */
+export function parseDelegation(
+  answer: string,
+  workers: TeamWorker[],
+): { worker: TeamWorker; question: string } | undefined {
+  const parsed = parseJsonAnswer(answer);
+  const value = parsed.value;
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return undefined;
+  const record = value as Record<string, unknown>;
+  const asked = String(record.ask ?? record.worker ?? '').trim();
+  if (!asked) return undefined;
+  const wanted = slugOf(asked.replace(/^ask_/i, ''));
+  const worker = workers.find(
+    (candidate) =>
+      candidate.slug === wanted ||
+      slugOf(candidate.name) === wanted ||
+      candidate.dotId === asked,
+  );
+  if (!worker) return undefined;
+  const question = String(
+    record.question ?? record.task ?? record.input ?? '',
+  ).trim();
+  return { worker, question: question || 'Help with the goal of this step.' };
+}
+/** Delegations a manager may make before it has to conclude. */
+const TEAM_MAX_ROUNDS = 20;
+const dotTeam: Executor = {
+  async run(ctx) {
+    const manager = requireDot(ctx, 'manager');
+    const workers = teamWorkers(ctx);
+    const rounds = Math.max(
+      1,
+      Math.min(Number(ctx.config.maxRounds) || 8, TEAM_MAX_ROUNDS),
+    );
+    const title = `Flow: ${ctx.flowName} / ${ctx.label}`;
+    const managerThread = await ctx.thread(manager.id, title, 'fresh');
+    const threads = new Map<string, string>();
+    const log: {
+      round: number;
+      worker: string;
+      dotId: string;
+      question: string;
+      answer: string;
+    }[] = [];
+    const roster = workers
+      .map(
+        (worker) =>
+          `- ask_${worker.slug}: ${worker.name}${worker.when ? ` — ${worker.when}` : ''}`,
+      )
+      .join('\n');
+    const parts = [
+      ctx.render(String(ctx.config.goal ?? '')).trim(),
+      `You lead this step. Your team:\n${roster}`,
+      `To ask one teammate, answer with JSON only: {"ask": "ask_<name>", "question": "<what you need>"}. One teammate per answer, at most ${rounds} questions in total. When you have enough, answer with your final result as ordinary text and no JSON.`,
+    ];
+    for (const port of ctx.inputs.context ?? [])
+      parts.push(contextSection(port));
+    const brief = parts.filter(Boolean).join('\n\n');
+    let answer = await ctx.turn(managerThread, brief);
+    for (let round = 1; round <= rounds; round++) {
+      const ask = parseDelegation(answer, workers);
+      if (!ask) break;
+      const { worker, question } = ask;
+      let thread = threads.get(worker.dotId);
+      if (!thread) {
+        thread = await ctx.thread(
+          worker.dotId,
+          `${title} / ${worker.name}`,
+          'fresh',
+        );
+        threads.set(worker.dotId, thread);
+      }
+      ctx.log(`${ctx.label}: ${manager.name} asked ${worker.name}.`);
+      let reply: string;
+      try {
+        reply = await ctx.turn(
+          thread,
+          [
+            `${manager.name} is leading an automated step and asks you:`,
+            question,
+            'Answer with the result only.',
+          ].join('\n\n'),
+        );
+      } catch (error) {
+        // A worker that cannot answer is news for the manager, not the end
+        // of the huddle: it can ask someone else or conclude without it.
+        reply = `(${worker.name} could not answer: ${error instanceof Error ? error.message : String(error)})`;
+        ctx.log(`${ctx.label}: ${reply}`);
+      }
+      log.push({
+        round,
+        worker: worker.slug,
+        dotId: worker.dotId,
+        question,
+        answer: reply,
+      });
+      const last = round === rounds;
+      answer = await ctx.turn(
+        managerThread,
+        `ask_${worker.slug} answered:\n${reply}\n\n${
+          last
+            ? `That was your last question. Give your final result now as ordinary text; do not ask anyone else.`
+            : 'Ask another teammate with JSON, or give your final result as ordinary text.'
+        }`,
+      );
+    }
+    if (parseDelegation(answer, workers)) {
+      ctx.log(
+        `${ctx.label}: ${manager.name} reached its ${rounds}-question limit; asking it to conclude.`,
+      );
+      answer = await ctx.turn(
+        managerThread,
+        'Stop delegating. Give your final result now as ordinary text and no JSON.',
+      );
+    }
+    return {
+      kind: 'output',
+      output: {
+        result: { kind: 'text', value: answer },
+        log: { kind: 'json', value: log },
+      },
+      input: brief,
+      threadId: managerThread,
+    };
+  },
+};
+
+const computerTask: Executor = {
+  async run(ctx) {
+    // Checked first: on a server without a computer supervisor this is the
+    // only thing worth saying, whatever else the step would need.
+    if (!ctx.platform.computers.configured)
+      throw new Error(COMPUTER_UNAVAILABLE_MESSAGE);
+    const dot = requireDot(ctx);
+    const permissions = ctx.platform.workspace.computers.permissions(dot.id);
+    if (!permissions.enabled)
+      throw new Error(
+        `${dot.name} is not allowed to use its computer. Turn its computer permission on first.`,
+      );
+    const startUrl = ctx.render(String(ctx.config.startUrl ?? '')).trim();
+    if (startUrl) {
+      await ctx.platform.computers.action(
+        dot.id,
+        'navigate',
+        { url: startUrl },
+        'agent',
+        ctx.signal,
+      );
+      ctx.log(`${ctx.label}: opened ${startUrl} on ${dot.name}'s computer.`);
+    }
+    const threadId = await ctx.thread(
+      dot.id,
+      `Flow: ${ctx.flowName} / ${ctx.label}`,
+      'fresh',
+    );
+    const parts = [
+      ctx.render(String(ctx.config.task ?? '')).trim(),
+      'Do this on your own computer with the computer tools: take computer_snapshot before browser work and report only what the tools actually returned.',
+    ];
+    if (startUrl) parts.push(`Its browser is already at ${startUrl}.`);
+    for (const port of ctx.inputs.context ?? [])
+      parts.push(contextSection(port));
+    const brief = parts.filter(Boolean).join('\n\n');
+    const text = await ctx.turn(threadId, brief);
+    return {
+      kind: 'output',
+      output: { result: { kind: 'text', value: text } },
+      input: brief,
+      threadId,
+    };
+  },
+};
+
 const unavailable: Executor = {
   async run(ctx) {
     throw new Error(
@@ -899,6 +1265,11 @@ export const EXECUTORS: Record<string, Executor> = {
   branch,
   combine,
   'human-review': humanReview,
+  wait,
+  'run-flow': runFlow,
+  'for-each': forEach,
+  'dot-team': dotTeam,
+  'computer-task': computerTask,
 };
 /** The executor for a node type; unknown and coming-soon types fail clearly. */
 export function executorFor(type: string): Executor {

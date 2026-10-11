@@ -46,6 +46,37 @@ export class FlowStore {
   private hydrate(row: Row): Flow {
     return { ...row, graph: JSON.parse(row.graph) as FlowGraph };
   }
+  /**
+   * Every flow's id, name and the graph a Run flow step would actually run,
+   * in one query. The linter needs these to tell a Run flow step that the
+   * flow it points at leads back here: `flow-cycle` walks this set (see
+   * LintContext.flows).
+   *
+   * The published version, falling back to the draft for an unpublished
+   * flow, because that is exactly what `FlowRunner.runChild` picks. Reading
+   * drafts instead let a cycle between two published versions pass the
+   * publish gate: publish A calling B, drop the call from A's draft without
+   * publishing, then publish B calling A.
+   */
+  graphs(): { id: string; name: string; graph: FlowGraph }[] {
+    return (
+      this.db
+        .prepare(
+          `SELECT f.id AS id, f.name AS name, COALESCE(v.graph, f.graph) AS graph
+             FROM flows f
+             LEFT JOIN flow_versions v ON v.id = f.publishedVersionId`,
+        )
+        .all() as unknown as {
+        id: string;
+        name: string;
+        graph: string;
+      }[]
+    ).map((row) => ({
+      id: row.id,
+      name: row.name,
+      graph: JSON.parse(row.graph) as FlowGraph,
+    }));
+  }
   list(): FlowSummary[] {
     return (
       this.db

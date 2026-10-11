@@ -91,15 +91,27 @@ import {
   ShortcutsSheet,
 } from './FlowVersions';
 import {
+  BODY_CARD,
+  CARD_WIDTH,
+  CONTAINER_SIZE,
   NOTE_SIZE,
+  absoluteOf,
+  canBeContained,
   applyNodePatch,
+  bodySpot,
+  clampToBody,
   connectionProblem,
+  containerAt,
+  editorSize,
   deselect,
   edgeFrom,
   freeSpot,
+  growToFit,
+  isContainer,
   isDecorative,
   motionMs,
   patchEditorNode,
+  reparentNodes,
   roomFor,
   structuralKey,
   toEditorNode,
@@ -107,6 +119,7 @@ import {
   useCanvasEdits,
   useFlowDocument,
   useNarrowScreen,
+  withBodies,
 } from './flow-history';
 
 const nodeTypes = { flow: FlowNodeCard };
@@ -543,11 +556,17 @@ function FlowEditorInner({
   const rightOf = useCallback(
     (nodeId: string) => {
       const source = nodesRef.current.find((n) => n.id === nodeId);
+      // Absolute: a step inside a For each stores a container-relative spot.
+      const at = source && absoluteOf(nodesRef.current, source);
+      // Clear of the source's own box, not a fixed step's width: a For each
+      // is 480 wide and resizable, so a fixed offset landed the next step
+      // inside the loop it was meant to follow.
+      const width = source
+        ? Math.max(CARD_WIDTH, editorSize(source).width)
+        : CARD_WIDTH;
       return freeSpot(
         nodesRef.current,
-        source
-          ? { x: source.position.x + 320, y: source.position.y }
-          : { x: 80, y: 120 },
+        at ? { x: at.x + width + 80, y: at.y } : { x: 80, y: 120 },
       );
     },
     [nodesRef],
@@ -569,6 +588,8 @@ function FlowEditorInner({
         dotId?: string;
         from?: { nodeId: string; port: string };
         anchor?: string;
+        /** Lands inside this container; `position` is then relative to it. */
+        parentId?: string;
       } = {},
     ) => {
       const spec = NODE_SPECS[type];
@@ -581,6 +602,36 @@ function FlowEditorInner({
         options.dotId ? { dot: options.dotId } : {},
       );
       if (isDecorative(type)) Object.assign(node, NOTE_SIZE);
+      if (isContainer(type)) Object.assign(node, CONTAINER_SIZE);
+      // Containers never nest and control flow stays outside a body, so
+      // only an ordinary step joins one (see canBeContained).
+      if (options.parentId && canBeContained(type)) {
+        node.parentId = options.parentId;
+      } else if (canBeContained(type)) {
+        // No container was asked for, but the spot lands over one: the step
+        // joins that body rather than floating above it. A step added from a
+        // container's own non-item output is the exception — it is meant to
+        // come *after* the loop, so it is never adopted by it.
+        const after =
+          options.from && options.from.port !== 'item'
+            ? options.from.nodeId
+            : undefined;
+        const host = containerAt(
+          nodesRef.current,
+          {
+            x: position.x + BODY_CARD.width / 2,
+            y: position.y + BODY_CARD.height / 2,
+          },
+          after,
+        );
+        if (host) {
+          node.parentId = host.id;
+          node.position = clampToBody(host, BODY_CARD, {
+            x: position.x - host.position.x,
+            y: position.y - host.position.y,
+          });
+        }
+      }
       let edge = options.from && edgeFrom(nodesRef.current, options.from, node);
       if (!edge && options.anchor) {
         // First output of the anchor step that the new step can take.
@@ -603,7 +654,13 @@ function FlowEditorInner({
       if (room) return notify(room);
       mutate((current, currentEdges) => ({
         nodes: [
-          ...deselect(current),
+          // A step added into a full loop body grows the loop rather than
+          // landing on top of the row above it.
+          ...deselect(current).map((n) =>
+            n.id === node.parentId
+              ? { ...n, ...growToFit(n, node.position) }
+              : n,
+          ),
           { ...toEditorNode(node, workspaceRef.current, []), selected: true },
         ],
         edges: edge ? [...currentEdges, edge] : currentEdges,
@@ -618,15 +675,32 @@ function FlowEditorInner({
     (type: string, dotId?: string) => {
       const state = picker ?? {};
       const sourceId = state.from?.nodeId ?? state.anchor;
-      const wanted = state.at
-        ? freeSpot(nodesRef.current, state.at)
-        : sourceId
-          ? rightOf(sourceId)
-          : freeSpot(nodesRef.current, centerSpot());
+      const source = sourceId
+        ? nodesRef.current.find((n) => n.id === sourceId)
+        : undefined;
+      // A step added while a For each is selected (or from its per-item
+      // output) lands inside the loop, and one added from a step that is
+      // already inside joins it there.
+      const host =
+        source && canBeContained(type)
+          ? isContainer(source.data.node.type)
+            ? !state.from || state.from.port === 'item'
+              ? source.id
+              : undefined
+            : source.parentId
+          : undefined;
+      const wanted = host
+        ? bodySpot(nodesRef.current, host)
+        : state.at
+          ? freeSpot(nodesRef.current, state.at)
+          : sourceId
+            ? rightOf(sourceId)
+            : freeSpot(nodesRef.current, centerSpot());
       addNode(type, wanted, {
         dotId,
         from: state.from,
         anchor: state.anchor,
+        parentId: host,
       });
     },
     [addNode, centerSpot, nodesRef, picker, rightOf],
@@ -635,7 +709,6 @@ function FlowEditorInner({
   /* ---------- removing, copying, moving ---------- */
   const {
     removeNodes,
-    removeSelected,
     copySelection,
     paste,
     duplicateNodes,
@@ -644,6 +717,103 @@ function FlowEditorInner({
     tidy,
     focusProblem,
   } = useCanvasEdits(doc, workspace, notify);
+  /**
+   * The container a dragged card would join if it were dropped now. Adoption
+   * is decided by the card's centre, so without this the outcome near a
+   * container's edge is not readable from what is on screen.
+   */
+  const [dropHost, setDropHost] = useState<string | null>(null);
+  /** Set while a container with a body waits for the delete to be confirmed. */
+  const [removeAsk, setRemoveAsk] = useState<{
+    ids: string[];
+    edgeIds: string[];
+    title: string;
+  } | null>(null);
+  /**
+   * Deleting a container takes the steps inside it with it, so that one is
+   * confirmed first; everything else goes straight away.
+   */
+  const requestRemove = useCallback(
+    (ids: string[], edgeIds: string[] = []) => {
+      const container = nodesRef.current.find(
+        (n) =>
+          ids.includes(n.id) &&
+          isContainer(n.data.node.type) &&
+          nodesRef.current.some((item) => item.parentId === n.id),
+      );
+      if (!container) return removeNodes(ids, edgeIds);
+      // Count the bodies themselves, not what the selection happens to miss:
+      // selecting a loop *and* one of its steps used to undercount, while
+      // removeNodes takes the whole body either way.
+      const containers = nodesRef.current.filter(
+        (n) =>
+          ids.includes(n.id) &&
+          isContainer(n.data.node.type) &&
+          nodesRef.current.some((item) => item.parentId === n.id),
+      );
+      const steps = containers.reduce(
+        (total, item) =>
+          total + withBodies(nodesRef.current, [item.id]).length - 1,
+        0,
+      );
+      const inside = `the ${steps} ${steps === 1 ? 'step' : 'steps'} inside`;
+      setRemoveAsk({
+        ids,
+        edgeIds,
+        title:
+          containers.length > 1
+            ? `Delete ${containers.length} For each containers and ${inside} them?`
+            : `Delete “${nodeLabel(container.data.node)}” and ${inside} it?`,
+      });
+    },
+    [nodesRef, removeNodes],
+  );
+  const requestRemoveSelected = useCallback(
+    () =>
+      requestRemove(
+        nodesRef.current.filter((n) => n.selected).map((n) => n.id),
+        edgesRef.current.filter((e) => e.selected).map((e) => e.id),
+      ),
+    [edgesRef, nodesRef, requestRemove],
+  );
+  /**
+   * A drag has landed. Membership is recomputed first — a step whose centre
+   * is now inside a For each joins its body (its position becoming
+   * container-relative), one whose centre left goes back to canvas
+   * coordinates — and the move and the membership change are recorded as one
+   * undo step. Deferred a task like `commit`, so React Flow's own position
+   * change for this drag is already in.
+   */
+  const trackDrag = useCallback(
+    (node: EditorNode) => {
+      if (!canBeContained(node.data.node.type)) return setDropHost(null);
+      const at = absoluteOf(nodesRef.current, node);
+      const size = editorSize(node);
+      const host = containerAt(
+        nodesRef.current,
+        { x: at.x + size.width / 2, y: at.y + size.height / 2 },
+        node.id,
+      );
+      setDropHost(host?.id ?? null);
+    },
+    [nodesRef],
+  );
+  const finishDrag = useCallback(
+    (ids: string[]) => {
+      window.setTimeout(() => {
+        const moved = reparentNodes(nodesRef.current, ids);
+        if (moved.refused)
+          notify(
+            moved.refusedKind === 'control'
+              ? 'Start and Finish stay outside a For each.'
+              : 'A For each cannot go inside another For each.',
+          );
+        setDropHost(null);
+        mutate(() => ({ nodes: moved.nodes }));
+      }, 0);
+    },
+    [mutate, nodesRef, notify],
+  );
 
   /* ---------- card and edge actions (context) ---------- */
   const actions = useMemo<EditorActions>(
@@ -692,22 +862,32 @@ function FlowEditorInner({
           ),
         })),
       duplicate: (id) => duplicateNodes([id]),
-      remove: (id) => removeNodes([id]),
+      remove: (id) => requestRemove([id]),
       removeEdge: (id) => removeNodes([], [id]),
+      detach: (id) => {
+        const moved = reparentNodes(nodesRef.current, [id], { detach: true });
+        if (!moved.changed.length) return;
+        mutate(() => ({ nodes: moved.nodes }));
+        notify('Moved out of the loop.');
+      },
       // The card's output '+': the picker opens in the right slot and the
       // step lands to the right of the source.
       addFrom: (id, port, kind) =>
         openPicker({ from: { nodeId: id, port, kind } }),
+      dropHost,
     }),
     [
       commit,
+      dropHost,
       duplicateNodes,
       edgesRef,
       mutate,
       nodesRef,
+      notify,
       openPicker,
       removeNodes,
       renamingId,
+      requestRemove,
       setCanvas,
     ],
   );
@@ -782,7 +962,7 @@ function FlowEditorInner({
     else if (mod && k === 'g') tidy();
     else if (!mod && (event.key === 'Backspace' || event.key === 'Delete')) {
       if (!inCanvas) return;
-      removeSelected();
+      requestRemoveSelected();
     } else if (!mod && event.key.startsWith('Arrow') && selected && inCanvas) {
       const step = event.shiftKey ? 50 : 10;
       const dx = { ArrowLeft: -step, ArrowRight: step }[event.key] ?? 0;
@@ -837,6 +1017,10 @@ function FlowEditorInner({
     const found = lintFlow(graph, {
       dots: workspaceRef.current.dots,
       spaces: workspaceRef.current.spaces,
+      // Enough for "a flow cannot run itself"; the whole-graph walk that
+      // catches a loop through another flow needs every flow's graph, which
+      // only the server has, so publish and run are where that is refused.
+      flowId,
     });
     doc.setProblems(found);
     return found;
@@ -1127,8 +1311,15 @@ function FlowEditorInner({
                   onConnect={onConnect}
                   onConnectEnd={onConnectEnd}
                   isValidConnection={isValidConnection}
-                  onNodeDragStop={commit}
-                  onSelectionDragStop={commit}
+                  onNodeDrag={(_event, node) => trackDrag(node)}
+                  onNodeDragStop={(_event, node, dragged) =>
+                    finishDrag(
+                      (dragged?.length ? dragged : [node]).map((n) => n.id),
+                    )
+                  }
+                  onSelectionDragStop={(_event, dragged) =>
+                    finishDrag(dragged.map((n) => n.id))
+                  }
                   onPaneClick={closePicker}
                   onPaneContextMenu={(event) => {
                     event.preventDefault();
@@ -1332,7 +1523,7 @@ function FlowEditorInner({
                   >,
                 ) => actions.patchNode(nodeId, patch)}
                 onDuplicate={(nodeId: string) => duplicateNodes([nodeId])}
-                onDelete={(nodeId: string) => removeNodes([nodeId])}
+                onDelete={(nodeId: string) => requestRemove([nodeId])}
                 onClose={clearSelection}
                 // "Next step" '+': the picker replaces the properties panel
                 // in the right slot, filtered to what this output can feed.
@@ -1367,6 +1558,18 @@ function FlowEditorInner({
           error={runState.error}
           onSubmit={(input, fields) => void launchRun(input, fields)}
           onCancel={() => setRunDialog(null)}
+        />
+      )}
+      {removeAsk && (
+        <ConfirmDialog
+          title={removeAsk.title}
+          body="The steps in the loop body are removed with it. Undo (⌘Z) brings them back."
+          confirmLabel="Delete"
+          onConfirm={() => {
+            removeNodes(removeAsk.ids, removeAsk.edgeIds);
+            setRemoveAsk(null);
+          }}
+          onCancel={() => setRemoveAsk(null)}
         />
       )}
       {deleteOpen && (

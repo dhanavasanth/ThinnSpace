@@ -42,11 +42,25 @@ export class PageError extends Error {
     super(message);
   }
 }
+/** What a page write tells its listener; see Pages.onWrite. */
+export interface PageWriteEvent {
+  spaceId: string;
+  pageId: string;
+  title: string;
+  event: 'created' | 'updated';
+  /** The flow run whose step made this write, when a step made it. */
+  runId?: string;
+}
+export type PageWriteListener = (write: PageWriteEvent) => void;
 export class Pages {
+  /** No-op until something registers interest, so every caller is unaffected. */
+  private listener: PageWriteListener = () => {};
   constructor(
     private db: DatabaseSync,
     private spaceExists: (id: string) => boolean,
+    listener?: PageWriteListener,
   ) {
+    if (listener) this.listener = listener;
     db.exec(
       'CREATE TABLE IF NOT EXISTS page_reviews(threadId TEXT NOT NULL, toolCallId TEXT NOT NULL, pageId TEXT NOT NULL, spaceId TEXT NOT NULL, draft TEXT, PRIMARY KEY(threadId,toolCallId))',
     );
@@ -68,6 +82,47 @@ export class Pages {
       db.exec(
         'ALTER TABLE page_threads ADD COLUMN leaseUntil INTEGER NOT NULL DEFAULT 0',
       );
+  }
+  /**
+   * Registers the one listener told about every successful page write, after
+   * the row is committed. Replaces any previous listener. Used by the flow
+   * trigger bridge for page Starts; a listener that throws is reported and
+   * never fails the write.
+   */
+  onWrite(listener: PageWriteListener) {
+    this.listener = listener;
+  }
+  /** The run whose step is writing, for the duration of one synchronous write. */
+  private writingRunId: string | undefined;
+  /**
+   * Attributes every write `write` makes to `runId`, so a page Start can tell
+   * a write its own chain caused from one a person made. `create`/`update`
+   * and the listener are all synchronous (node:sqlite), so one run's
+   * attribution can never be read by another.
+   */
+  attribute<T>(runId: string, write: () => T): T {
+    const previous = this.writingRunId;
+    this.writingRunId = runId;
+    try {
+      return write();
+    } finally {
+      this.writingRunId = previous;
+    }
+  }
+  private announce(page: Page, event: PageWriteEvent['event']) {
+    try {
+      this.listener({
+        spaceId: page.spaceId,
+        pageId: page.id,
+        title: page.title,
+        event,
+        ...(this.writingRunId ? { runId: this.writingRunId } : {}),
+      });
+    } catch (error) {
+      console.error(
+        `Page write listener failed: ${error instanceof Error ? error.name : 'Error'}`,
+      );
+    }
   }
   requireSpace(spaceId: string) {
     if (!this.spaceExists(spaceId))
@@ -109,6 +164,16 @@ export class Pages {
     spaceId: string,
     input: z.input<typeof pageInput>,
     sourceThreadId: string | null = null,
+  ): Page {
+    const page = this.insert(spaceId, input, sourceThreadId);
+    this.announce(page, 'created');
+    return page;
+  }
+  /** The insert on its own: createReviewed announces after its commit. */
+  private insert(
+    spaceId: string,
+    input: z.input<typeof pageInput>,
+    sourceThreadId: string | null,
   ): Page {
     this.requireSpace(spaceId);
     const parsed = pageInput.safeParse(input);
@@ -182,7 +247,7 @@ export class Pages {
         this.db.exec('COMMIT');
         return { ...page, reviewDraft: previous.draft };
       }
-      const page = this.create(
+      const page = this.insert(
         spaceId,
         { title: draft.title, content: draft.content },
         threadId,
@@ -193,6 +258,9 @@ export class Pages {
         )
         .run(threadId, toolCallId, page.id, spaceId, JSON.stringify(draft));
       this.db.exec('COMMIT');
+      // After the commit: a listener must never run inside the transaction,
+      // and a rolled-back save must never look like a page write.
+      this.announce(page, 'created');
       return { ...page, reviewDraft: draft };
     } catch (error) {
       this.db.exec('ROLLBACK');
@@ -230,7 +298,9 @@ export class Pages {
           data.expectedRevision,
         );
       this.db.exec('COMMIT');
-      return this.get(spaceId, id);
+      const saved = this.get(spaceId, id);
+      this.announce(saved, 'updated');
+      return saved;
     } catch (error) {
       this.db.exec('ROLLBACK');
       throw error;

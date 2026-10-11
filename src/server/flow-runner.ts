@@ -21,6 +21,7 @@ import type { RunRecord, TriggerRow } from './flow-run-store.js';
 import {
   executorFor,
   toText,
+  type ChildRun,
   type Decision,
   type PortValue,
   type StepContext,
@@ -28,12 +29,16 @@ import {
   type ThreadMode,
 } from './flow-executors.js';
 import {
+  FOR_EACH_MAX_CONCURRENCY,
+  MAX_FLOW_DEPTH,
   NODE_SPECS,
+  bodyNodes,
   listValues,
   nodeFields,
   nodeInputs,
   nodeLabel,
   nodeOutputs,
+  tokenSlug,
   upstreamRefs,
   type Flow,
   type FlowEdge,
@@ -57,6 +62,11 @@ export const STOPPED_MESSAGE =
 export const SCHEDULER_INTERVAL_MS = 30_000;
 /** Concurrent items for a per-item step. */
 const ITEM_CONCURRENCY = 5;
+/**
+ * How often Run flow checks whether its child has parked. Only that case
+ * needs polling: finishing and aborting are both observed directly.
+ */
+const CHILD_POLL_MS = 250;
 
 // Pure helpers ------------------------------------------------------------
 
@@ -259,6 +269,57 @@ function fallbackText(node: FlowNode, output: StepOutput) {
     ? `continuing down the ${label} arm with an empty value.`
     : 'continuing, but no arm was taken, so the steps after it are skipped.';
 }
+/** The list a For each works through, or an error the owner can act on. */
+export function containerItems(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (value == null || value === '') return [];
+  if (typeof value === 'string') {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {
+      // Not JSON: fall through to the error below.
+    }
+  }
+  throw new Error('For each needs a list on its List input.');
+}
+/** The steps of a container's body, in stable order, decoration aside. */
+function bodySteps(graph: FlowGraph, containerId: string) {
+  return bodyNodes(graph, containerId).filter(
+    (node) => !NODE_SPECS[node.type]?.decorative,
+  );
+}
+/**
+ * What one pass through a body produced: the value of its last steps, the
+ * ones nothing else inside reads. A single ending step contributes its value
+ * directly; several contribute an object keyed by their chip name, so the
+ * Results array stays readable either way.
+ */
+export function iterationResult(
+  graph: FlowGraph,
+  body: FlowNode[],
+  states: Map<string, NodeRun>,
+): unknown {
+  const inside = new Set(body.map((node) => node.id));
+  const endings = body.filter(
+    (node) =>
+      !graph.edges.some(
+        (edge) => edge.source === node.id && inside.has(edge.target),
+      ),
+  );
+  const valueOf = (node: FlowNode) => {
+    const output = states.get(node.id)?.output;
+    if (!output) return null;
+    const port =
+      nodeOutputs(node).find((candidate) => candidate.id in output) ??
+      Object.keys(output).map((id) => ({ id }))[0];
+    return port ? (output[port.id]?.value ?? null) : null;
+  };
+  if (endings.length === 1) return valueOf(endings[0]);
+  return Object.fromEntries(
+    endings.map((node) => [tokenSlug(node), valueOf(node)]),
+  );
+}
 /** One attempt counter per node, and per item of a per-item step. */
 function attemptKey(nodeId: string, item?: { index: number }) {
   return item ? `${nodeId}:${item.index}` : nodeId;
@@ -277,6 +338,18 @@ function triggerText(trigger: RunTrigger) {
 }
 function message(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+/**
+ * A step inside a For each tried to park. The body is run to completion once
+ * per item, so there is no worker to hand back and nothing to resume: this is
+ * the body's shape being wrong rather than one item failing, which is why it
+ * is fatal for the container whatever `onItemError` and `onError` say. The
+ * linter refuses the shape while the flow is drawn (`body-not-supported`).
+ */
+class BodyCannotPause extends Error {
+  constructor(label: string) {
+    super(`${label} cannot pause inside a For each.`);
+  }
 }
 /** Why a run stopped early; also the abort reason handed to executors. */
 class RunStop extends Error {
@@ -300,6 +373,13 @@ class RunExecution {
   readonly graph: FlowGraph;
   readonly states = new Map<string, NodeRun>();
   private readonly running = new Set<string>();
+  /**
+   * Executor calls driven by a container's or a per-item fan-out's own
+   * workers. They are not in `running` (they are not outer steps), so `pump`
+   * counts them here; without this a loop with concurrency 5 would run five
+   * executors while pump still believed one slot was taken.
+   */
+  private inner = 0;
   private readonly controller = new AbortController();
   private readonly threads = new Map<string, string>();
   /** The attempt in progress (or last recorded) per node and item. */
@@ -418,6 +498,9 @@ class RunExecution {
           for (const node of executable(this.graph)) {
             if (this.states.get(node.id)?.state !== 'pending') continue;
             if (node.type === 'start') continue;
+            // A For each body is driven by its container, once per item, so
+            // the outer pass leaves those steps alone.
+            if (node.parentId) continue;
             const config = mergedConfig(node);
             const state = readiness(
               this.graph,
@@ -430,7 +513,7 @@ class RunExecution {
               changed = true;
             } else if (
               state === 'ready' &&
-              this.running.size < RUN_LIMITS.concurrency
+              this.running.size + this.inner < RUN_LIMITS.concurrency
             ) {
               this.launch(node);
               changed = true;
@@ -457,6 +540,19 @@ class RunExecution {
     }
   }
 
+  /**
+   * Runs one inner worker (a container iteration or a per-item fan-out) with
+   * its executor call counted against the run's step concurrency, so every
+   * path through the engine shares the one documented cap.
+   */
+  private async innerWorker<T>(work: () => Promise<T>): Promise<T> {
+    this.inner += 1;
+    try {
+      return await work();
+    } finally {
+      this.inner -= 1;
+    }
+  }
   private launch(node: FlowNode) {
     this.running.add(node.id);
     this.states.set(node.id, { state: 'running', output: null });
@@ -489,12 +585,19 @@ class RunExecution {
     this.armedAt = null;
   }
 
-  /** Live values per input port, in connection order. */
-  private collectInputs(node: FlowNode): Record<string, PortValue[]> {
+  /**
+   * Live values per input port, in connection order. A For each body passes
+   * its own states, where the container stands completed with the item it is
+   * handling, so a body step reads that item instead of the whole list.
+   */
+  private collectInputs(
+    node: FlowNode,
+    states: Map<string, NodeRun> = this.states,
+  ): Record<string, PortValue[]> {
     const inputs: Record<string, PortValue[]> = {};
     for (const edge of this.graph.edges) {
       if (edge.target !== node.id) continue;
-      const source = this.states.get(edge.source);
+      const source = states.get(edge.source);
       if (edgeState(edge, source) !== 'value') continue;
       const entry = source!.output![edge.sourceHandle];
       const from = this.node(edge.source);
@@ -511,14 +614,13 @@ class RunExecution {
     inputs: Record<string, PortValue[]>,
     signal: AbortSignal,
     item?: { index: number; value: unknown },
+    /** Chip lookup for a For each body, where the container holds one item. */
+    resolve?: (id: string) => StepOutput | null | undefined,
   ): StepContext {
     const label = nodeLabel(node);
     const reported = new Set<string>();
-    const scope = tokenScope(
-      this.graph,
-      node.id,
-      this.record.trigger,
-      (id) => this.states.get(id)?.output,
+    const scope = tokenScope(this.graph, node.id, this.record.trigger, (id) =>
+      resolve ? resolve(id) : this.states.get(id)?.output,
     );
     return {
       runId: this.id,
@@ -544,8 +646,18 @@ class RunExecution {
       log: (text) => this.event(node.id, 'log', text),
       message: (text) => this.event(node.id, 'message', text),
       setResult: (name, part) => this.setResult(name, part),
+      replyToTrigger: (text) => this.runner.replyToTrigger(this.id, text),
       thread: (dotId, title, mode, key) => this.thread(dotId, title, mode, key),
       turn: (threadId, prompt) => this.turn(node, threadId, prompt, signal),
+      child: (flowId, input, fields) =>
+        this.runner.runChild({
+          parentRunId: this.id,
+          flowId,
+          input,
+          fields,
+          signal,
+          log: (text) => this.event(node.id, 'log', `${label}: ${text}`),
+        }),
       platform: this.runner.platform,
     };
   }
@@ -643,13 +755,17 @@ class RunExecution {
       const primary = nodeInputs(node)[0]?.id;
       const first = primary ? inputs[primary]?.[0]?.value : undefined;
       const outcome =
-        config.perItem && primary && Array.isArray(first)
-          ? await this.runItems(node, inputs, primary, first)
-          : await this.attempt(node, inputs, 1, undefined, startedAt);
+        node.type === 'for-each'
+          ? await this.runContainer(node, inputs, startedAt)
+          : config.perItem && primary && Array.isArray(first)
+            ? await this.runItems(node, inputs, primary, first)
+            : await this.attempt(node, inputs, 1, undefined, startedAt);
       if (this.finished) return;
       const info = this.attemptOf(node, startedAt);
       if (outcome.kind === 'wait')
         this.park(node, outcome, info.startedAt, info.attempt);
+      else if (outcome.kind === 'sleep')
+        this.parkWait(node, outcome, info.startedAt, info.attempt);
       else this.complete(node, outcome, info.startedAt, info.attempt);
     } catch (error) {
       if (this.finished) return;
@@ -681,6 +797,7 @@ class RunExecution {
     attempt: number,
     item: { index: number; value: unknown } | undefined,
     startedAt: number,
+    resolve?: (id: string) => StepOutput | null | undefined,
   ): Promise<StepOutcome> {
     const config = mergedConfig(node);
     const label = nodeLabel(node);
@@ -708,7 +825,7 @@ class RunExecution {
       });
       return await Promise.race([
         executorFor(node.type).run(
-          this.context(node, inputs, step.signal, item),
+          this.context(node, inputs, step.signal, item, resolve),
         ),
         aborted,
       ]);
@@ -743,7 +860,7 @@ class RunExecution {
           status: 'running',
           startedAt: finishedAt,
         });
-        return this.attempt(node, inputs, 2, item, finishedAt);
+        return this.attempt(node, inputs, 2, item, finishedAt, resolve);
       }
       throw error;
     } finally {
@@ -806,10 +923,8 @@ class RunExecution {
             item,
             startedAt,
           );
-          if (outcome.kind === 'wait')
-            throw new Error(
-              'A step that waits for a person cannot run once per item.',
-            );
+          if (outcome.kind !== 'output')
+            throw new Error('A step that pauses cannot run once per item.');
           outputs[index] = outcome.output;
           const info = this.attemptOf(node, startedAt, item);
           this.store.saveStep({
@@ -844,7 +959,9 @@ class RunExecution {
       }
     };
     await Promise.all(
-      Array.from({ length: Math.min(ITEM_CONCURRENCY, list.length) }, worker),
+      Array.from({ length: Math.min(ITEM_CONCURRENCY, list.length) }, () =>
+        this.innerWorker(worker),
+      ),
     );
     const ports = new Set<string>();
     for (const output of outputs)
@@ -856,6 +973,292 @@ class RunExecution {
         value: outputs.map((entry) => entry?.[port]?.value ?? null),
       };
     return { kind: 'output', output, input: { items: list.length } };
+  }
+
+  // For each ---------------------------------------------------------------
+
+  /**
+   * Runs a For each: its body once per item, with `iterationKey` = the item
+   * index on every step inside, then the collected results on `results`. The
+   * body never reaches the outer readiness pass (see pump), so this is the
+   * only thing that schedules those steps.
+   */
+  private async runContainer(
+    node: FlowNode,
+    inputs: Record<string, PortValue[]>,
+    startedAt: number,
+  ): Promise<StepOutcome> {
+    const label = nodeLabel(node);
+    const config = mergedConfig(node);
+    const body = bodySteps(this.graph, node.id);
+    const items = containerItems(inputs.list?.[0]?.value);
+    const cap = Math.max(
+      1,
+      Math.min(
+        Number(config.maxItems) || RUN_LIMITS.maxItems,
+        RUN_LIMITS.maxItems,
+      ),
+    );
+    const list = items.slice(0, cap);
+    if (items.length > list.length)
+      this.event(
+        node.id,
+        'log',
+        `${label}: only the first ${list.length} of ${items.length} items run.`,
+      );
+    if (!body.length) {
+      this.event(
+        node.id,
+        'log',
+        `${label} has no steps inside it, so there is nothing to repeat.`,
+      );
+      return {
+        kind: 'output',
+        output: { results: { kind: 'json', value: [] } },
+        input: { items: 0 },
+      };
+    }
+    const concurrency = Math.max(
+      1,
+      Math.min(Number(config.concurrency) || 1, FOR_EACH_MAX_CONCURRENCY),
+    );
+    const stopOnError = config.onItemError === 'stop';
+    this.event(
+      node.id,
+      'log',
+      `${label} runs ${body.length} step${body.length === 1 ? '' : 's'} for each of ${list.length} item${list.length === 1 ? '' : 's'}.`,
+    );
+    const results: unknown[] = new Array(list.length).fill(null);
+    /** Per body step, the output of every item, so the '' row can hold them. */
+    const collected = new Map<string, (StepOutput | null)[]>(
+      body.map((step) => [step.id, new Array(list.length).fill(null)]),
+    );
+    let failure: unknown;
+    let next = 0;
+    const worker = async () => {
+      while (next < list.length) {
+        const index = next++;
+        if (this.controller.signal.aborted || failure !== undefined) return;
+        try {
+          const states = await this.runIteration(
+            node,
+            body,
+            index,
+            list[index],
+          );
+          results[index] = iterationResult(this.graph, body, states);
+          for (const step of body)
+            collected.get(step.id)![index] =
+              states.get(step.id)?.output ?? null;
+        } catch (error) {
+          if (this.controller.signal.aborted) throw error;
+          // "Cannot pause" is the body's shape being wrong, not this item
+          // going wrong: skipping it would leave every item unsaved and the
+          // run green. The linter refuses the shape, so this is the net.
+          if (stopOnError || error instanceof BodyCannotPause) {
+            failure = error;
+            return;
+          }
+          this.event(
+            node.id,
+            'log',
+            `${label}: item ${index + 1} failed (${message(error)}); skipping it.`,
+          );
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, list.length) }, () =>
+        this.innerWorker(worker),
+      ),
+    );
+    this.closeBody(node, body, collected, list.length, startedAt);
+    if (failure !== undefined) throw failure;
+    return {
+      kind: 'output',
+      output: { results: { kind: 'json', value: results } },
+      input: { items: list.length },
+    };
+  }
+  /**
+   * One pass through the body with `item` bound, scheduled by the same
+   * readiness rule the outer graph uses: the container stands completed with
+   * this one item on its Item port, so skip propagation inside a body works
+   * exactly as it does outside.
+   */
+  private async runIteration(
+    container: FlowNode,
+    body: FlowNode[],
+    index: number,
+    value: unknown,
+  ): Promise<Map<string, NodeRun>> {
+    const states = new Map(this.states);
+    states.set(container.id, {
+      state: 'completed',
+      output: {
+        item: {
+          kind: typeof value === 'string' ? 'text' : 'json',
+          value,
+        },
+      },
+    });
+    for (const step of body)
+      states.set(step.id, { state: 'pending', output: null });
+    const resolve = (id: string) =>
+      states.get(id)?.output ?? this.states.get(id)?.output;
+    for (let open = true; open;) {
+      open = false;
+      for (const step of body) {
+        if (states.get(step.id)?.state !== 'pending') continue;
+        this.controller.signal.throwIfAborted();
+        const config = mergedConfig(step);
+        const ready = readiness(
+          this.graph,
+          step.id,
+          states,
+          config.startWhen === 'first' ? 'first' : 'all',
+        );
+        if (ready === 'wait') continue;
+        open = true;
+        if (ready === 'skip') {
+          states.set(step.id, { state: 'skipped', output: null });
+          this.store.saveStep({
+            runId: this.id,
+            nodeId: step.id,
+            nodeType: step.type,
+            label: nodeLabel(step),
+            iterationKey: String(index),
+            status: 'skipped',
+            error: 'No input arrived for this item.',
+            finishedAt: Date.now(),
+          });
+          continue;
+        }
+        await this.runBodyStep(step, index, value, states, resolve);
+      }
+    }
+    return states;
+  }
+  /** One body step for one item: its own row, keyed by the item index. */
+  private async runBodyStep(
+    node: FlowNode,
+    index: number,
+    value: unknown,
+    states: Map<string, NodeRun>,
+    resolve: (id: string) => StepOutput | null | undefined,
+  ) {
+    const label = nodeLabel(node);
+    const config = mergedConfig(node);
+    const startedAt = Date.now();
+    const base = {
+      runId: this.id,
+      nodeId: node.id,
+      nodeType: node.type,
+      label,
+      iterationKey: String(index),
+    };
+    this.store.saveStep({ ...base, status: 'running', startedAt });
+    states.set(node.id, { state: 'running', output: null });
+    const inputs = this.collectInputs(node, states);
+    try {
+      const outcome = await this.attempt(
+        node,
+        inputs,
+        1,
+        { index, value },
+        startedAt,
+        resolve,
+      );
+      if (outcome.kind !== 'output') throw new BodyCannotPause(label);
+      const info = this.attemptOf(node, startedAt, { index });
+      this.store.saveStep({
+        ...base,
+        attempt: info.attempt,
+        status: 'completed',
+        input: outcome.input,
+        output: outcome.output,
+        threadId: outcome.threadId,
+        startedAt: info.startedAt,
+        finishedAt: Date.now(),
+      });
+      states.set(node.id, { state: 'completed', output: outcome.output });
+    } catch (error) {
+      const info = this.attemptOf(node, startedAt, { index });
+      const continues =
+        config.onError === 'continue' &&
+        !this.controller.signal.aborted &&
+        !(error instanceof BodyCannotPause);
+      const output = continues ? fallbackOutput(node) : null;
+      this.store.saveStep({
+        ...base,
+        attempt: info.attempt,
+        status: 'failed',
+        output,
+        error: message(error),
+        startedAt: info.startedAt,
+        finishedAt: Date.now(),
+      });
+      states.set(node.id, { state: 'failed', output });
+      if (!continues) throw error;
+      this.event(
+        node.id,
+        'log',
+        `${label} (item ${index + 1}): ${fallbackText(node, output!)}`,
+      );
+    }
+  }
+  /**
+   * Closes the body's ordinary rows once the loop is over: each step gets its
+   * per-item outputs as arrays, so the run log shows the body as part of the
+   * run rather than as steps that never ran.
+   */
+  private closeBody(
+    container: FlowNode,
+    body: FlowNode[],
+    collected: Map<string, (StepOutput | null)[]>,
+    items: number,
+    startedAt: number,
+  ) {
+    const finishedAt = Date.now();
+    for (const step of body) {
+      const outputs = collected.get(step.id) ?? [];
+      if (!items || !outputs.some(Boolean)) {
+        this.states.set(step.id, { state: 'skipped', output: null });
+        this.store.saveStep({
+          runId: this.id,
+          nodeId: step.id,
+          nodeType: step.type,
+          label: nodeLabel(step),
+          status: 'skipped',
+          error: items
+            ? `No item reached this step inside ${nodeLabel(container)}.`
+            : `${nodeLabel(container)} had no items.`,
+          finishedAt,
+        });
+        continue;
+      }
+      const ports = new Set(
+        outputs.flatMap((output) => Object.keys(output ?? {})),
+      );
+      const output: StepOutput = {};
+      for (const port of ports)
+        output[port] = {
+          kind: 'json',
+          value: outputs.map((entry) => entry?.[port]?.value ?? null),
+        };
+      this.states.set(step.id, { state: 'completed', output });
+      this.store.saveStep({
+        runId: this.id,
+        nodeId: step.id,
+        nodeType: step.type,
+        label: nodeLabel(step),
+        status: 'completed',
+        input: { items },
+        output,
+        startedAt,
+        finishedAt,
+      });
+    }
   }
 
   private complete(
@@ -978,6 +1381,88 @@ class RunExecution {
       `${label} is waiting for your decision: ${approval.title}`,
     );
   }
+  /**
+   * Parks a Wait step until its time comes. Nothing is held: the step row and
+   * the run go to waiting, the wake time is persisted, the run timer is
+   * disarmed by the next pump, and the scheduler (or the next server start)
+   * picks the step up again through FlowRunner.wakeDue.
+   */
+  private parkWait(
+    node: FlowNode,
+    outcome: Extract<StepOutcome, { kind: 'sleep' }>,
+    startedAt: number,
+    attempt = 1,
+  ) {
+    const label = nodeLabel(node);
+    this.states.set(node.id, { state: 'waiting', output: null });
+    this.store.saveStep({
+      runId: this.id,
+      nodeId: node.id,
+      nodeType: node.type,
+      label,
+      attempt,
+      status: 'waiting',
+      input: outcome.input,
+      startedAt,
+    });
+    this.store.saveWait(this.id, node.id, outcome.until);
+    this.store.setStatus(this.id, 'waiting', { waitingNodeId: node.id });
+    this.event(
+      node.id,
+      'step',
+      `${label} is waiting until ${new Date(outcome.until).toISOString()}.`,
+    );
+  }
+  /** Carries a parked Wait on once its time arrived. */
+  async wake(nodeId: string) {
+    const node = this.node(nodeId);
+    if (!node || this.states.get(nodeId)?.state !== 'waiting') return;
+    const label = nodeLabel(node);
+    this.store.clearWait(this.id, nodeId);
+    const others = [...this.states.entries()].find(
+      ([id, run]) => id !== nodeId && run.state === 'waiting',
+    );
+    this.store.setStatus(this.id, 'running', {
+      waitingNodeId: others?.[0] ?? null,
+    });
+    this.states.set(nodeId, { state: 'running', output: null });
+    this.running.add(nodeId);
+    this.armTimer();
+    // The step started when it parked, so its row keeps that time.
+    const info = this.attemptOf(node, Date.now());
+    try {
+      const executor = executorFor(node.type);
+      const inputs = this.collectInputs(node);
+      const ctx = this.context(node, inputs, this.controller.signal);
+      const output = executor.wake ? await executor.wake(ctx) : {};
+      if (!this.finished)
+        this.complete(
+          node,
+          { kind: 'output', output },
+          info.startedAt,
+          info.attempt,
+        );
+    } catch (error) {
+      if (!this.finished) {
+        const continues = mergedConfig(node).onError === 'continue';
+        const output = continues ? fallbackOutput(node) : null;
+        this.failStep(
+          node,
+          info.startedAt,
+          message(error),
+          output,
+          info.attempt,
+        );
+        if (!output)
+          this.halt(
+            new RunStop('failed', `${label} failed: ${message(error)}`),
+          );
+      }
+    } finally {
+      this.running.delete(nodeId);
+      this.pump();
+    }
+  }
 
   /** Applies a decision to the waiting step and carries on. */
   async resume(approval: FlowApproval, decision: Decision) {
@@ -1054,6 +1539,8 @@ class RunExecution {
           error: stop.message,
         });
     this.store.expireApprovals(this.id);
+    // A parked Wait has nothing to wake up to any more.
+    this.store.clearWaits(this.id);
     if (!this.running.size || stop.outcome === 'interrupted') this.finish();
   }
   /**
@@ -1097,6 +1584,7 @@ class RunExecution {
     }
     // Per-item rows of those steps close with the same reason.
     if (this.stop) this.store.failOpenSteps(this.id, reason);
+    this.store.clearWaits(this.id);
     const hasResult = !!this.result;
     this.store.setStatus(this.id, outcome, {
       error: this.stop?.message ?? null,
@@ -1127,10 +1615,33 @@ class RunExecution {
  */
 export class FlowRunner {
   private readonly active = new Map<string, RunExecution>();
+  /**
+   * Per run, the way back to the conversation that started it (today only a
+   * Slack thread, handed over by FlowTriggerBridge). In memory only: a reply
+   * is a live callback on the channel that received the mention, so a run
+   * rehydrated after a restart simply has none and says so.
+   */
+  private readonly replies = new Map<string, (text: string) => Promise<void>>();
   private timer?: ReturnType<typeof setInterval>;
   constructor(readonly platform: Platform) {}
   get store() {
     return this.platform.workspace.runs;
+  }
+  /** Gives a run a way to answer in the conversation that triggered it. */
+  attachReply(runId: string, reply: (text: string) => Promise<void>) {
+    this.replies.set(runId, reply);
+  }
+  /**
+   * Posts a step's text back into the conversation that started the run.
+   * Returns false when there is none — an unpublished flow run by hand, a
+   * run rehydrated after a restart — so the step can say so in the run log
+   * instead of failing.
+   */
+  async replyToTrigger(runId: string, text: string): Promise<boolean> {
+    const reply = this.replies.get(runId);
+    if (!reply) return false;
+    await reply(text);
+    return true;
   }
 
   /** Creates a queued run against a snapshot of `graph`; call start() next. */
@@ -1139,6 +1650,8 @@ export class FlowRunner {
     graph: FlowGraph,
     versionId: string | null,
     trigger: RunTrigger,
+    /** The run whose Run flow step is starting this one. */
+    parentRunId: string | null = null,
   ): RunRecord {
     return this.store.create({
       flowId: flow.id,
@@ -1146,6 +1659,7 @@ export class FlowRunner {
       versionId,
       graph: structuredClone(graph),
       trigger,
+      parentRunId,
       steps: executable(graph).map((node) => ({
         nodeId: node.id,
         nodeType: node.type,
@@ -1180,6 +1694,7 @@ export class FlowRunner {
   }
   release(runId: string) {
     this.active.delete(runId);
+    this.replies.delete(runId);
   }
   /**
    * Forgets everything about a flow being deleted: active runs are dropped
@@ -1226,6 +1741,124 @@ export class FlowRunner {
     return this.store.get(approval.runId);
   }
 
+  // Run flow ---------------------------------------------------------------
+
+  /**
+   * Runs another flow as a child of `parentRunId` and resolves with its
+   * result. The child is an ordinary run row with `parentRunId` set, so it
+   * shows up in that flow's history and the chain is what the recursion
+   * guard reads: a flow may not appear twice in its own ancestry, and
+   * MAX_FLOW_DEPTH bounds how deep the nesting goes.
+   *
+   * A child that parks for a person cannot be answered from inside a step,
+   * so it is cancelled and the step fails saying so; cancelling the parent
+   * cancels the child through the step's abort signal.
+   */
+  async runChild(options: {
+    parentRunId: string;
+    flowId: string;
+    input: string;
+    fields?: Record<string, unknown>;
+    signal: AbortSignal;
+    log?: (text: string) => void;
+  }): Promise<ChildRun> {
+    const flows = this.platform.workspace.flows;
+    const flow = flows.get(options.flowId);
+    if (!flow) throw new Error('The chosen flow no longer exists.');
+    const chain = this.store.ancestry(options.parentRunId);
+    if (chain.some((entry) => entry.flowId === options.flowId))
+      throw new Error(
+        chain[0]?.flowId === options.flowId
+          ? `"${flow.name}" cannot run itself.`
+          : `"${flow.name}" is already running further up this chain, so it cannot run again here.`,
+      );
+    if (chain.length >= MAX_FLOW_DEPTH)
+      throw new Error(
+        `Flows can only run ${MAX_FLOW_DEPTH} deep; "${flow.name}" would be one level too far.`,
+      );
+    const version = flow.publishedVersionId
+      ? flows.version(flow.id, flow.publishedVersionId)
+      : undefined;
+    const graph = version?.graph ?? flow.graph;
+    const starts = graph.nodes.filter((node) => node.type === 'start');
+    const start =
+      starts.find((node) => (node.config.trigger ?? 'manual') === 'manual') ??
+      starts[0];
+    if (!start) throw new Error(`"${flow.name}" has no Start node.`);
+    options.signal.throwIfAborted();
+    const record = this.create(
+      flow,
+      graph,
+      version?.id ?? null,
+      {
+        source: 'manual',
+        nodeId: start.id,
+        input: options.input,
+        fields: options.fields,
+      },
+      options.parentRunId,
+    );
+    options.log?.(
+      `running "${flow.name}"${version ? '' : ' (draft)'} as run ${record.id}.`,
+    );
+    this.start(record.id);
+    const settled = this.settled(record.id);
+    // Three things end the wait, and only one of them needs polling. The
+    // child finishing settles its own promise and aborting fires an event, so
+    // both are watched once; a child that parks never settles, so that one is
+    // noticed by reading just its status every CHILD_POLL_MS. Every promise
+    // here is created once, so nothing accumulates handlers for the life of
+    // the child (which a `Promise.race` inside the loop used to do).
+    const finished = settled.then(() => 'finished' as const);
+    const aborted = new Promise<'aborted'>((resolve) => {
+      if (options.signal.aborted) resolve('aborted');
+      else
+        options.signal.addEventListener('abort', () => resolve('aborted'), {
+          once: true,
+        });
+    });
+    let stopPolling = false;
+    let poll: ReturnType<typeof setTimeout> | undefined;
+    const parked = (async () => {
+      for (;;) {
+        await new Promise((resolve) => {
+          poll = setTimeout(resolve, CHILD_POLL_MS);
+        });
+        if (stopPolling) return 'finished' as const;
+        const status = this.store.statusOf(record.id)?.status;
+        if (status === 'waiting') return 'parked' as const;
+        if (!status || !runIsActive(status)) return 'finished' as const;
+      }
+    })();
+    let outcome: 'finished' | 'aborted' | 'parked';
+    try {
+      outcome = await Promise.race([finished, aborted, parked]);
+    } finally {
+      stopPolling = true;
+      clearTimeout(poll);
+    }
+    if (outcome !== 'finished') {
+      this.cancel(record.id);
+      await settled;
+      if (outcome === 'aborted') throw options.signal.reason;
+      throw new Error(
+        `"${flow.name}" stopped to wait, and a flow used as a step cannot wait. Take the Human review or Wait out of it.`,
+      );
+    }
+    const current = this.store.run(record.id);
+    if (!current) throw new Error(`The run of "${flow.name}" disappeared.`);
+    if (current.status !== 'completed')
+      throw new Error(
+        `"${flow.name}" ${current.status}${current.error ? `: ${current.error}` : '.'}`,
+      );
+    return {
+      runId: current.id,
+      flowName: flow.name,
+      text: current.result?.text ?? '',
+      sources: current.result?.sources ?? [],
+    };
+  }
+
   // Triggers ---------------------------------------------------------------
 
   /** Rebuilds the schedule and webhook triggers of a flow from its published version. */
@@ -1262,6 +1895,10 @@ export class FlowRunner {
   }
   /** Starts a run of the published version from a trigger; undefined when it cannot run. */
   fire(flowId: string, nodeId: string, trigger: Omit<RunTrigger, 'nodeId'>) {
+    // Every trigger — schedule, webhook, Slack mention, page write — comes
+    // through here, so this is where a paused workspace stops them. A manual
+    // run (POST /flows/:id/runs) is an explicit act and goes around it.
+    if (this.platform.store.settings().paused) return undefined;
     const flows = this.platform.workspace.flows;
     const flow = flows.get(flowId);
     const version = flow?.publishedVersionId
@@ -1285,8 +1922,37 @@ export class FlowRunner {
     this.timer = setInterval(() => void this.tick(), SCHEDULER_INTERVAL_MS);
     void this.tick();
   }
+  /**
+   * Carries on every parked Wait that is due. Runs left waiting by a restart
+   * are rehydrated from their rows here, which is why a Wait survives one.
+   */
+  async wakeDue(now = Date.now()) {
+    let due: { runId: string; nodeId: string }[];
+    try {
+      due = this.store.dueWaits(now);
+    } catch {
+      console.error(
+        'Flow waits could not be read; will retry on the next tick.',
+      );
+      return;
+    }
+    for (const row of due)
+      try {
+        const execution = this.execution(row.runId);
+        if (!execution) {
+          this.store.clearWait(row.runId, row.nodeId);
+          continue;
+        }
+        await execution.wake(row.nodeId);
+      } catch (error) {
+        console.error(
+          `Flow scheduler could not resume run ${row.runId} (${row.nodeId}): ${message(error)}`,
+        );
+      }
+  }
   async tick() {
     const now = Date.now();
+    await this.wakeDue(now);
     let due: TriggerRow[];
     try {
       due = this.store.claimDue(now, (row) => nextScheduleAt(row.config, now));

@@ -21,6 +21,14 @@ export interface RunRecord extends FlowRunSummary {
   graph: FlowGraph;
   result: RunResult | null;
   dotTurns: number;
+  /** The run whose Run flow step started this one; null for a top-level run. */
+  parentRunId: string | null;
+}
+/** A parked Wait step and the moment the scheduler should wake it. */
+export interface WaitRow {
+  runId: string;
+  nodeId: string;
+  wakeAt: number;
 }
 /** A registered trigger for a published flow (schedule or webhook). */
 export interface TriggerRow {
@@ -47,6 +55,7 @@ interface RunRow {
   startedAt: number;
   finishedAt: number | null;
   dotTurns: number;
+  parentRunId: string | null;
 }
 type StepRow = Omit<FlowRunStep, 'input' | 'output'> & {
   input: string | null;
@@ -66,6 +75,9 @@ type TriggerDbRow = Omit<TriggerRow, 'config' | 'active'> & {
   config: string;
   active: number;
 };
+
+/** How far `triggerChain` follows parents and page-trigger hops. */
+const TRIGGER_CHAIN_LIMIT = 32;
 
 export const INTERRUPTED_MESSAGE =
   'The server restarted while this run was in progress.';
@@ -88,11 +100,14 @@ export class FlowRunStore {
       CREATE INDEX IF NOT EXISTS flow_approvals_status ON flow_approvals(status, createdAt);
       CREATE TABLE IF NOT EXISTS flow_triggers(id TEXT PRIMARY KEY, flowId TEXT NOT NULL, nodeId TEXT NOT NULL, kind TEXT NOT NULL, config TEXT NOT NULL, active INTEGER NOT NULL, nextRunAt INTEGER);
       CREATE INDEX IF NOT EXISTS flow_triggers_due ON flow_triggers(kind, active, nextRunAt);
-      CREATE TABLE IF NOT EXISTS flow_threads(flowId TEXT NOT NULL, dotId TEXT NOT NULL, key TEXT NOT NULL, threadId TEXT NOT NULL, PRIMARY KEY(flowId, dotId, key));`);
+      CREATE TABLE IF NOT EXISTS flow_threads(flowId TEXT NOT NULL, dotId TEXT NOT NULL, key TEXT NOT NULL, threadId TEXT NOT NULL, PRIMARY KEY(flowId, dotId, key));
+      CREATE TABLE IF NOT EXISTS flow_run_waits(runId TEXT NOT NULL, nodeId TEXT NOT NULL, wakeAt INTEGER NOT NULL, PRIMARY KEY(runId, nodeId));
+      CREATE INDEX IF NOT EXISTS flow_run_waits_due ON flow_run_waits(wakeAt);`);
     // Columns added after the first release; existing databases gain them in place.
     for (const [table, column, definition] of [
       ['flows', 'webhookToken', 'TEXT'],
       ['flow_runs', 'dotTurns', 'INTEGER NOT NULL DEFAULT 0'],
+      ['flow_runs', 'parentRunId', 'TEXT'],
     ]) {
       if (
         !db
@@ -117,6 +132,7 @@ export class FlowRunStore {
       // their reviews expire: nobody could act on them any more.
       this.failOpenSteps(id, INTERRUPTED_MESSAGE);
       this.expireApprovals(id);
+      this.clearWaits(id);
       this.event(id, null, 'run', INTERRUPTED_MESSAGE);
     }
   }
@@ -163,6 +179,7 @@ export class FlowRunStore {
       graph: JSON.parse(row.graph) as FlowGraph,
       result: parse<RunResult>(row.result),
       dotTurns: row.dotTurns,
+      parentRunId: row.parentRunId ?? null,
       ...this.counts(row.id),
     };
   }
@@ -178,13 +195,15 @@ export class FlowRunStore {
     graph: FlowGraph;
     trigger: RunTrigger;
     steps: { nodeId: string; nodeType: string; label: string }[];
+    /** Set when a Run flow step started this run. */
+    parentRunId?: string | null;
   }): RunRecord {
     const id = randomUUID();
     const now = Date.now();
     this.transaction(() => {
       this.db
         .prepare(
-          "INSERT INTO flow_runs (id, flowId, flowName, versionId, status, trigger, graph, startedAt, dotTurns) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, 0)",
+          "INSERT INTO flow_runs (id, flowId, flowName, versionId, status, trigger, graph, startedAt, dotTurns, parentRunId) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, 0, ?)",
         )
         .run(
           id,
@@ -194,6 +213,7 @@ export class FlowRunStore {
           JSON.stringify(input.trigger),
           JSON.stringify(input.graph),
           now,
+          input.parentRunId ?? null,
         );
       for (const step of input.steps)
         this.db
@@ -216,6 +236,7 @@ export class FlowRunStore {
       'flow_run_steps',
       'flow_run_events',
       'flow_approvals',
+      'flow_run_waits',
       'flow_runs',
     ])
       this.db
@@ -227,7 +248,11 @@ export class FlowRunStore {
   /** Deletes every run (steps, events, approvals) and trigger of a flow. */
   removeFlow(flowId: string) {
     this.transaction(() => {
-      for (const table of ['flow_run_steps', 'flow_run_events'])
+      for (const table of [
+        'flow_run_steps',
+        'flow_run_events',
+        'flow_run_waits',
+      ])
         this.db
           .prepare(
             `DELETE FROM ${table} WHERE runId IN (SELECT id FROM flow_runs WHERE flowId=?)`,
@@ -287,6 +312,61 @@ export class FlowRunStore {
   recentRuns(limit = 20): FlowRunSummary[] {
     const take = Math.min(100, Math.max(1, Math.trunc(limit) || 20));
     return this.summaries('', [take]);
+  }
+  /**
+   * The flows with a run the engine is actually working on. Deliberately not
+   * `active()`: a run parked on a Wait or a Human review holds no worker and
+   * can write nothing, so counting it as busy would silence that flow's page
+   * trigger for as long as the park lasts. Only ids, so a page save no longer
+   * parses every active run's graph on its way through.
+   */
+  busyFlowIds(): string[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT DISTINCT flowId FROM flow_runs WHERE status IN ('queued','running')",
+        )
+        .all() as unknown as { flowId: string }[]
+    ).map((row) => row.flowId);
+  }
+  /** Just a run's status and error, without materialising the whole record. */
+  statusOf(
+    runId: string,
+  ): { status: RunStatus; error: string | null } | undefined {
+    return this.db
+      .prepare('SELECT status, error FROM flow_runs WHERE id=?')
+      .get(runId) as unknown as
+      { status: RunStatus; error: string | null } | undefined;
+  }
+  /**
+   * The flows causally upstream of a run, its own first: Run flow parents
+   * (see `ancestry`) plus page-trigger hops, which a page-started run records
+   * as `trigger.fields.runId`. Two flows that write into each other's watched
+   * Spaces would otherwise trigger each other forever, so `pageWritten`
+   * refuses a flow that already appears in this chain.
+   */
+  triggerChain(runId: string): string[] {
+    const flows: string[] = [];
+    const seen = new Set<string>();
+    let current: string | undefined = runId;
+    for (let hop = 0; current && hop < TRIGGER_CHAIN_LIMIT; hop += 1) {
+      if (seen.has(current)) break;
+      seen.add(current);
+      const row = this.db
+        .prepare(
+          'SELECT flowId, parentRunId, trigger FROM flow_runs WHERE id=?',
+        )
+        .get(current) as unknown as
+        | { flowId: string; parentRunId: string | null; trigger: string }
+        | undefined;
+      if (!row) break;
+      flows.push(row.flowId);
+      const trigger = parse<RunTrigger>(row.trigger);
+      const via = trigger?.fields?.runId;
+      current =
+        row.parentRunId ?? (typeof via === 'string' && via ? via : undefined);
+    }
+    return flows;
   }
   /** Runs that still need the engine or a person. */
   active(): RunRecord[] {
@@ -548,6 +628,64 @@ export class FlowRunStore {
         )
         .run(status, feedback, editedText, Date.now(), id).changes > 0
     );
+  }
+  // Parked waits ---------------------------------------------------------
+  /**
+   * Remembers that a Wait step is parked until `wakeAt`. The row is what
+   * makes a Wait free: the run holds no worker and no timer while it sleeps,
+   * and the scheduler tick (or the next server start) finds it here.
+   */
+  saveWait(runId: string, nodeId: string, wakeAt: number) {
+    this.db
+      .prepare(
+        'INSERT INTO flow_run_waits (runId, nodeId, wakeAt) VALUES (?, ?, ?) ON CONFLICT(runId, nodeId) DO UPDATE SET wakeAt=excluded.wakeAt',
+      )
+      .run(runId, nodeId, wakeAt);
+  }
+  /** When a parked Wait is due, or undefined when that step is not parked. */
+  waitAt(runId: string, nodeId: string): number | undefined {
+    const row = this.db
+      .prepare('SELECT wakeAt FROM flow_run_waits WHERE runId=? AND nodeId=?')
+      .get(runId, nodeId) as { wakeAt: number } | undefined;
+    return row?.wakeAt;
+  }
+  clearWait(runId: string, nodeId: string) {
+    this.db
+      .prepare('DELETE FROM flow_run_waits WHERE runId=? AND nodeId=?')
+      .run(runId, nodeId);
+  }
+  /** Drops every parked wait of a run: it was cancelled, failed, or ended. */
+  clearWaits(runId: string) {
+    this.db.prepare('DELETE FROM flow_run_waits WHERE runId=?').run(runId);
+  }
+  /** Parked waits that are due, oldest first; only for runs still waiting. */
+  dueWaits(now: number): WaitRow[] {
+    return this.db
+      .prepare(
+        "SELECT w.runId, w.nodeId, w.wakeAt FROM flow_run_waits w JOIN flow_runs r ON r.id=w.runId WHERE w.wakeAt<=? AND r.status IN ('running','waiting') ORDER BY w.wakeAt",
+      )
+      .all(now) as unknown as WaitRow[];
+  }
+  /**
+   * The chain of flows a run sits under, nearest parent first, which is how
+   * Run flow refuses a flow that would call itself transitively. The run's
+   * own flow is the first entry, so `length` is also its nesting depth.
+   */
+  ancestry(runId: string): { runId: string; flowId: string }[] {
+    const chain: { runId: string; flowId: string }[] = [];
+    const seen = new Set<string>();
+    let current: string | null = runId;
+    while (current && !seen.has(current)) {
+      seen.add(current);
+      const row = this.db
+        .prepare('SELECT id, flowId, parentRunId FROM flow_runs WHERE id=?')
+        .get(current) as
+        { id: string; flowId: string; parentRunId: string | null } | undefined;
+      if (!row) break;
+      chain.push({ runId: row.id, flowId: row.flowId });
+      current = row.parentRunId;
+    }
+    return chain;
   }
   expireApprovals(runId: string) {
     this.db

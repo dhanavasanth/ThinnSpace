@@ -4,6 +4,7 @@ import type { Platform } from './platform.js';
 import {
   FLOW_LIMITS,
   NODE_SPECS,
+  canContain,
   configWithDefaults,
   emptyGraph,
   fieldVisible,
@@ -41,6 +42,11 @@ const nodeSchema = z
     collapsed: z.boolean().optional(),
     width: z.number().positive().max(2000).optional(),
     height: z.number().positive().max(2000).optional(),
+    // A step inside a For each body names its container here, and its
+    // position is then relative to that container (see the container model
+    // in src/shared/flows.ts). Without this the schema is strict enough to
+    // reject every flow that has a loop body at all.
+    parentId: z.string().min(1).max(40).optional(),
   })
   .strict();
 const edgeSchema = z
@@ -90,6 +96,16 @@ function graphError(graph: FlowGraph): string | undefined {
     if (ids.has(node.id)) return `Duplicate node id ${node.id}.`;
     ids.add(node.id);
     if (!NODE_SPECS[node.type]) return `Unknown node type ${node.type}.`;
+  }
+  // A body membership no container drives leaves a step the outer readiness
+  // pass skips and nobody runs, so the rule is the model's own: the parent
+  // must exist, be a For each, and not itself sit inside one.
+  for (const node of graph.nodes) {
+    if (!node.parentId) continue;
+    if (!ids.has(node.parentId))
+      return `${node.id} sits inside a container that is not in this flow.`;
+    if (!canContain(graph, node.parentId))
+      return `${node.id} sits inside ${node.parentId}, which cannot hold steps.`;
   }
   const edgeIds = new Set<string>();
   for (const edge of graph.edges) {
@@ -177,9 +193,16 @@ export function flowRoutes(platform: Platform) {
         if (field.control === 'space' && space) node.config[field.key] = space;
       }
   };
-  const lintContext = () => ({
+  /**
+   * `flowId` and every flow's graph arm the Run flow recursion rules: without
+   * them `flow-cycle` and `missing-flow` stay quiet. Publishing and starting
+   * a run are the two places that must refuse a loop, so both pass them.
+   */
+  const lintContext = (flowId?: string) => ({
     dots: platform.workspace.dots(),
     spaces: platform.workspace.spaces(),
+    flowId,
+    flows: flows.graphs(),
   });
   const stale = (c: { json: (body: unknown, status: 409) => Response }) =>
     c.json(
@@ -284,7 +307,7 @@ export function flowRoutes(platform: Platform) {
       return c.json({ error: 'Invalid publish request.' }, 400);
     const flow = flows.get(c.req.param('id'));
     if (!flow) return c.json({ error: 'Flow not found.' }, 404);
-    const errors = lintFlow(flow.graph, lintContext()).filter(
+    const errors = lintFlow(flow.graph, lintContext(flow.id)).filter(
       (problem) => problem.level === 'error',
     );
     if (errors.length)
@@ -340,7 +363,7 @@ export function flowRoutes(platform: Platform) {
   app.post('/flows/:id/validate', (c) => {
     const flow = flows.get(c.req.param('id'));
     if (!flow) return c.json({ error: 'Flow not found.' }, 404);
-    return c.json({ problems: lintFlow(flow.graph, lintContext()) });
+    return c.json({ problems: lintFlow(flow.graph, lintContext(flow.id)) });
   });
   app.get('/flows/:id/versions', (c) =>
     flows.get(c.req.param('id'))

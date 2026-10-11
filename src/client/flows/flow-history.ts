@@ -97,12 +97,75 @@ export function redoHistory(history: History): History | undefined {
 /* ---------- canvas model ---------- */
 
 export const CARD_WIDTH = 240;
+/** The icon square a step card draws; its label block hangs outside the box. */
+export const CARD_SQUARE = 96;
 export const NOTE_SIZE = { width: 220, height: 140 };
 const COLUMN_GAP = 320;
 const ROW_GAP = 220;
+/** For each containers: the size they start at and the floor the resizer keeps. */
+export const CONTAINER_SIZE = { width: 480, height: 300 };
+export const CONTAINER_MIN = { width: 320, height: 220 };
+/** Header strip height and the padding around the body area inside it. */
+export const CONTAINER_HEADER = 48;
+export const CONTAINER_PAD = 18;
+/** Body cards are the 96px squares, so they sit closer than outer columns. */
+const BODY_COLUMN_GAP = 150;
+const BODY_ROW_GAP = 160;
+/** The label block under a card's icon square, which the square's box excludes. */
+export const CARD_LABEL = 52;
+/**
+ * The box a step card really occupies: the icon square plus the label block
+ * hanging under it. Used wherever a card has to fit inside a container, so a
+ * stored position matches what React Flow then draws from the measured height.
+ */
+export const BODY_CARD = {
+  width: CARD_SQUARE,
+  height: CARD_SQUARE + CARD_LABEL,
+};
 
 export function isDecorative(type: string) {
   return !!NODE_SPECS[type]?.decorative;
+}
+/**
+ * A container is drawn as a body that other cards live inside. The shared
+ * model allows `for-each` only (see `canContain`) and containers never nest,
+ * so one level of parent/child is all the canvas ever has to resolve.
+ */
+export function isContainer(type: string) {
+  return type === 'for-each';
+}
+/**
+ * Whether a step may live inside a container's body. Containers never nest,
+ * and control flow belongs to the outer graph: a Start inside a body is
+ * never fired (the container drives the body, not the trigger) and a Finish
+ * inside one would rewrite the run result once per item. `lintFlow`'s
+ * `body-not-supported` rule refuses the same three types, so an imported
+ * graph is reported as well as a dragged one.
+ */
+export function canBeContained(type: string) {
+  return !isContainer(type) && type !== 'start' && type !== 'finish';
+}
+/** The box a stored node occupies on the canvas. */
+export function storedSize(node: Pick<FlowNode, 'type' | 'width' | 'height'>) {
+  if (isContainer(node.type))
+    return {
+      width: node.width ?? CONTAINER_SIZE.width,
+      height: node.height ?? CONTAINER_SIZE.height,
+    };
+  if (isDecorative(node.type))
+    return {
+      width: node.width ?? NOTE_SIZE.width,
+      height: node.height ?? NOTE_SIZE.height,
+    };
+  return { width: CARD_SQUARE, height: CARD_SQUARE };
+}
+/** The same box, preferring what React Flow has measured. */
+export function editorSize(node: EditorNode) {
+  const stored = storedSize(node.data.node);
+  return {
+    width: node.measured?.width ?? node.width ?? stored.width,
+    height: node.measured?.height ?? node.height ?? stored.height,
+  };
 }
 export function resolveDot(
   node: FlowNode,
@@ -136,6 +199,7 @@ export function toEditorNode(
   previous?: EditorNode,
 ): EditorNode {
   const decorative = isDecorative(node.type);
+  const container = isContainer(node.type);
   return {
     id: node.id,
     type: 'flow',
@@ -149,12 +213,13 @@ export function toEditorNode(
       status: 'idle',
     },
     selected: previous?.selected ?? false,
-    zIndex: decorative ? -1 : 0,
-    ...(decorative
-      ? {
-          width: node.width ?? NOTE_SIZE.width,
-          height: node.height ?? NOTE_SIZE.height,
-        }
+    // A container is drawn behind the cards it holds; notes behind both.
+    zIndex: container ? -2 : decorative ? -1 : 0,
+    ...(decorative || container ? storedSize(node) : {}),
+    // React Flow's own parent/child model: a child's position is relative to
+    // its container and `extent` keeps it inside the container's bounds.
+    ...(node.parentId
+      ? { parentId: node.parentId, extent: 'parent' as const }
       : {}),
   };
 }
@@ -191,6 +256,7 @@ export function serializeCanvas(
   nodes: EditorNode[],
   edges: EditorEdge[],
 ): Snapshot {
+  const ids = new Set(nodes.map((editorNode) => editorNode.id));
   return {
     nodes: nodes.map((editorNode) => {
       const node: FlowNode = {
@@ -200,10 +266,16 @@ export function serializeCanvas(
           y: Math.round(editorNode.position.y),
         },
       };
-      if (isDecorative(node.type)) {
+      if (isDecorative(node.type) || isContainer(node.type)) {
         if (editorNode.width) node.width = Math.round(editorNode.width);
         if (editorNode.height) node.height = Math.round(editorNode.height);
       }
+      // React Flow's field is the live one: a drop into (or out of) a
+      // container changes it, so it decides what is stored. A container that
+      // is no longer on the canvas leaves no membership behind.
+      if (editorNode.parentId && ids.has(editorNode.parentId))
+        node.parentId = editorNode.parentId;
+      else delete node.parentId;
       return node;
     }),
     edges: edges.map((edge) => ({
@@ -230,6 +302,9 @@ export function structuralKey(snapshot: Snapshot) {
       node.typeVersion,
       node.label ?? '',
       node.config,
+      // Which loop a step sits in is structure, not layout: moving a card
+      // into a For each changes what the engine runs.
+      node.parentId ?? '',
     ]),
     edges: snapshot.edges,
   });
@@ -270,7 +345,12 @@ export function applyNodePatch(
   });
 }
 
-/** Copy nodes and the edges between them with fresh ids, shifted by `offset`. */
+/**
+ * Copy nodes and the edges between them with fresh ids, shifted by `offset`.
+ * A copied container takes its body with it: the children's `parentId` is
+ * remapped to the copy and their positions, being container-relative, stay
+ * as they are so the body lands laid out the same way.
+ */
 export function cloneSubgraph(
   nodes: FlowNode[],
   edges: FlowEdge[],
@@ -278,12 +358,20 @@ export function cloneSubgraph(
 ): Snapshot {
   const ids = new Map(nodes.map((node) => [node.id, newNodeId()]));
   return {
-    nodes: nodes.map((node) => ({
-      ...node,
-      id: ids.get(node.id)!,
-      position: { x: node.position.x + offset, y: node.position.y + offset },
-      config: { ...node.config },
-    })),
+    nodes: nodes.map((node) => {
+      const parentId = node.parentId ? ids.get(node.parentId) : undefined;
+      const clone: FlowNode = {
+        ...node,
+        id: ids.get(node.id)!,
+        position: parentId
+          ? { ...node.position }
+          : { x: node.position.x + offset, y: node.position.y + offset },
+        config: { ...node.config },
+      };
+      if (parentId) clone.parentId = parentId;
+      else delete clone.parentId;
+      return clone;
+    }),
     edges: edges
       .filter((edge) => ids.has(edge.source) && ids.has(edge.target))
       .map((edge) => ({
@@ -295,13 +383,18 @@ export function cloneSubgraph(
   };
 }
 
-/** A spot at or near `wanted` that does not overlap an existing card. */
+/**
+ * A spot at or near `wanted` that does not overlap an existing card. Body
+ * nodes are skipped: their positions are container-relative, so they say
+ * nothing about what is free out on the canvas.
+ */
 export function freeSpot(
-  nodes: Pick<FlowNode, 'position'>[],
+  nodes: (Pick<FlowNode, 'position'> & { parentId?: string })[],
   wanted: { x: number; y: number },
 ) {
+  const outer = nodes.filter((node) => !node.parentId);
   const occupied = (x: number, y: number) =>
-    nodes.some(
+    outer.some(
       (node) =>
         Math.abs(node.position.x - x) < CARD_WIDTH + 20 &&
         Math.abs(node.position.y - y) < 150,
@@ -317,16 +410,216 @@ export function freeSpot(
   return { x: Math.round(x), y: Math.round(y) };
 }
 
+/* ---------- containers ---------- */
+
 /**
- * Left-to-right columns by topological depth; rows keep the nodes' relative
- * vertical order. Notes are left where they are.
+ * React Flow requires a parent node to come before its children in the node
+ * array; every write goes through `setCanvas`, which keeps that invariant.
  */
-export function tidyLayout(snapshot: Snapshot) {
-  const steps = snapshot.nodes.filter((node) => !isDecorative(node.type));
-  const ids = new Set(steps.map((node) => node.id));
+export function orderByParent<T extends { id: string; parentId?: string }>(
+  nodes: T[],
+): T[] {
+  if (!nodes.some((node) => node.parentId)) return nodes;
+  const ids = new Set(nodes.map((node) => node.id));
+  const bodies = new Map<string, T[]>();
+  const outer: T[] = [];
+  for (const node of nodes) {
+    if (node.parentId && ids.has(node.parentId))
+      bodies.set(node.parentId, [...(bodies.get(node.parentId) ?? []), node]);
+    else outer.push(node);
+  }
+  return outer.flatMap((node) => [node, ...(bodies.get(node.id) ?? [])]);
+}
+/** Absolute canvas position of an editor node, resolving container offset. */
+export function absoluteOf(nodes: EditorNode[], node: EditorNode) {
+  if (!node.parentId) return node.position;
+  const parent = nodes.find((item) => item.id === node.parentId);
+  return parent
+    ? {
+        x: parent.position.x + node.position.x,
+        y: parent.position.y + node.position.y,
+      }
+    : node.position;
+}
+/** The container (if any) whose box holds an absolute canvas point. */
+export function containerAt(
+  nodes: EditorNode[],
+  point: { x: number; y: number },
+  exclude?: string,
+) {
+  return nodes.find((node) => {
+    if (node.id === exclude) return false;
+    if (!isContainer(node.data.node.type) || node.parentId) return false;
+    const size = editorSize(node);
+    return (
+      point.x >= node.position.x &&
+      point.x <= node.position.x + size.width &&
+      point.y >= node.position.y &&
+      point.y <= node.position.y + size.height
+    );
+  });
+}
+/** A relative position that keeps a child inside its container's body area. */
+export function clampToBody(
+  container: EditorNode,
+  size: { width: number; height: number },
+  position: { x: number; y: number },
+) {
+  const box = editorSize(container);
+  const maxX = Math.max(CONTAINER_PAD, box.width - CONTAINER_PAD - size.width);
+  const maxY = Math.max(
+    CONTAINER_HEADER,
+    box.height - CONTAINER_PAD - size.height,
+  );
+  return {
+    x: Math.round(Math.min(Math.max(position.x, CONTAINER_PAD), maxX)),
+    y: Math.round(Math.min(Math.max(position.y, CONTAINER_HEADER), maxY)),
+  };
+}
+/** Set or clear a node's container, carrying the stored copy along with it. */
+function setMembership(
+  node: EditorNode,
+  parentId: string | undefined,
+  position: { x: number; y: number },
+): EditorNode {
+  const stored: FlowNode = { ...node.data.node, position };
+  if (parentId) stored.parentId = parentId;
+  else delete stored.parentId;
+  return {
+    ...node,
+    position,
+    parentId,
+    extent: parentId ? 'parent' : undefined,
+    data: { ...node.data, node: stored },
+  };
+}
+/** `ids` plus every node that lives inside the containers among them. */
+export function withBodies(
+  nodes: { id: string; parentId?: string }[],
+  ids: string[],
+) {
+  const all = new Set(ids);
+  for (const node of nodes)
+    if (node.parentId && all.has(node.parentId)) all.add(node.id);
+  return [...all];
+}
+/**
+ * The container's box, grown if needed so a body card at `position` fits.
+ * Adding a step into a full body grows the loop, the way tidy does, instead
+ * of stacking the new card on top of the last row.
+ */
+export function growToFit(
+  container: EditorNode,
+  position: { x: number; y: number },
+  card: { width: number; height: number } = BODY_CARD,
+) {
+  const box = editorSize(container);
+  return {
+    width: Math.max(box.width, position.x + card.width + CONTAINER_PAD),
+    height: Math.max(box.height, position.y + card.height + CONTAINER_PAD),
+  };
+}
+/**
+ * A free spot inside a container's body, in container-relative coordinates.
+ * Columns wrap within the container's width; rows are allowed to run past
+ * its height, because the caller grows the container (`growToFit`) rather
+ * than clamping a new card onto the previous row.
+ */
+export function bodySpot(nodes: EditorNode[], containerId: string) {
+  const container = nodes.find((node) => node.id === containerId);
+  if (!container) return { x: CONTAINER_PAD, y: CONTAINER_HEADER };
+  const body = nodes.filter((node) => node.parentId === containerId);
+  const box = editorSize(container);
+  let x = CONTAINER_PAD;
+  let y = CONTAINER_HEADER + 10;
+  for (let step = 0; step < 40; step += 1) {
+    const clash = body.some(
+      (node) =>
+        Math.abs(node.position.x - x) < CARD_SQUARE + 24 &&
+        Math.abs(node.position.y - y) < CARD_SQUARE + 24,
+    );
+    if (!clash) break;
+    x += BODY_COLUMN_GAP;
+    if (x > box.width - CONTAINER_PAD - CARD_SQUARE) {
+      x = CONTAINER_PAD;
+      y += BODY_ROW_GAP;
+    }
+  }
+  return {
+    x: Math.round(Math.max(x, CONTAINER_PAD)),
+    y: Math.round(Math.max(y, CONTAINER_HEADER)),
+  };
+}
+
+export interface Reparented {
+  nodes: EditorNode[];
+  /** Ids whose container membership changed. */
+  changed: string[];
+  /** Something a body cannot hold was dropped into one and left outside. */
+  refused: boolean;
+  /** Which rule refused it, so the notice can say which. */
+  refusedKind?: 'container' | 'control';
+}
+/**
+ * Recompute container membership for the nodes that just moved. A node whose
+ * centre lands inside a container joins its body and its position becomes
+ * container-relative; one whose centre leaves goes back to absolute canvas
+ * coordinates. Containers never nest, so a container over a container keeps
+ * its own membership and the caller says so.
+ */
+export function reparentNodes(
+  nodes: EditorNode[],
+  ids: string[],
+  options: { detach?: boolean } = {},
+): Reparented {
+  const moved = new Set(ids);
+  const changed: string[] = [];
+  let refused = false;
+  let refusedKind: Reparented['refusedKind'];
+  const next = nodes.map((node) => {
+    if (!moved.has(node.id)) return node;
+    const absolute = absoluteOf(nodes, node);
+    const size = editorSize(node);
+    const centre = {
+      x: absolute.x + size.width / 2,
+      y: absolute.y + size.height / 2,
+    };
+    const host = options.detach
+      ? undefined
+      : containerAt(nodes, centre, node.id);
+    if (host && !canBeContained(node.data.node.type)) {
+      refused = true;
+      refusedKind ??= isContainer(node.data.node.type)
+        ? 'container'
+        : 'control';
+      return node;
+    }
+    if ((host?.id ?? undefined) === node.parentId) return node;
+    changed.push(node.id);
+    if (!host) return setMembership(node, undefined, absolute);
+    return setMembership(
+      node,
+      host.id,
+      clampToBody(host, size, {
+        x: absolute.x - host.position.x,
+        y: absolute.y - host.position.y,
+      }),
+    );
+  });
+  return {
+    nodes: changed.length ? next : nodes,
+    changed,
+    refused,
+    ...(refusedKind ? { refusedKind } : {}),
+  };
+}
+
+/** Columns by topological depth over one set of nodes. */
+function depthColumns(nodes: FlowNode[], edges: FlowEdge[]) {
+  const ids = new Set(nodes.map((node) => node.id));
   const parents = new Map<string, string[]>();
   const children = new Map<string, string[]>();
-  for (const edge of snapshot.edges) {
+  for (const edge of edges) {
     if (!ids.has(edge.source) || !ids.has(edge.target)) continue;
     parents.set(edge.target, [
       ...(parents.get(edge.target) ?? []),
@@ -339,9 +632,9 @@ export function tidyLayout(snapshot: Snapshot) {
   }
   const depth = new Map<string, number>();
   const pending = new Map(
-    steps.map((node) => [node.id, parents.get(node.id)?.length ?? 0]),
+    nodes.map((node) => [node.id, parents.get(node.id)?.length ?? 0]),
   );
-  const queue = steps
+  const queue = nodes
     .filter((node) => !pending.get(node.id))
     .map((node) => node.id);
   while (queue.length) {
@@ -355,24 +648,71 @@ export function tidyLayout(snapshot: Snapshot) {
     }
   }
   const columns = new Map<number, FlowNode[]>();
-  for (const node of steps) {
+  for (const node of nodes) {
     const level = depth.get(node.id) ?? 0;
     columns.set(level, [...(columns.get(level) ?? []), node]);
   }
+  return [...columns.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([level, column]) => ({
+      level,
+      column: [...column].sort((a, b) => a.position.y - b.position.y),
+    }));
+}
+
+export interface TidyLayout {
+  /** Absolute spots for outer nodes, container-relative ones for a body. */
+  positions: Map<string, { x: number; y: number }>;
+  /** Containers grown so their laid-out body fits. */
+  sizes: Map<string, { width: number; height: number }>;
+}
+/**
+ * Left-to-right columns by topological depth; rows keep the nodes' relative
+ * vertical order. Notes are left where they are. A container's body is laid
+ * out inside it first (growing the container to fit), and the container then
+ * takes part in the outer layout as one box.
+ */
+export function tidyLayout(snapshot: Snapshot): TidyLayout {
+  const positions = new Map<string, { x: number; y: number }>();
+  const sizes = new Map<string, { width: number; height: number }>();
+  for (const container of snapshot.nodes) {
+    if (!isContainer(container.type) || container.parentId) continue;
+    const body = snapshot.nodes.filter(
+      (node) => node.parentId === container.id && !isDecorative(node.type),
+    );
+    // Tidy only ever grows a container, so a size the author chose stands.
+    const current = storedSize(container);
+    let width = Math.max(CONTAINER_MIN.width, current.width);
+    let height = Math.max(CONTAINER_MIN.height, current.height);
+    for (const { level, column } of depthColumns(body, snapshot.edges))
+      column.forEach((node, row) => {
+        const x = CONTAINER_PAD + level * BODY_COLUMN_GAP;
+        const y = CONTAINER_HEADER + 10 + row * BODY_ROW_GAP;
+        positions.set(node.id, { x, y });
+        width = Math.max(width, x + BODY_CARD.width + CONTAINER_PAD);
+        // Room for the label block that hangs under a card's square.
+        height = Math.max(height, y + BODY_CARD.height + CONTAINER_PAD);
+      });
+    sizes.set(container.id, { width, height });
+  }
+  const steps = snapshot.nodes.filter(
+    (node) => !node.parentId && !isDecorative(node.type),
+  );
   const minX = Math.min(...steps.map((node) => node.position.x), 80);
   const minY = Math.min(...steps.map((node) => node.position.y), 120);
-  const positions = new Map<string, { x: number; y: number }>();
-  for (const [level, column] of columns) {
-    column
-      .sort((a, b) => a.position.y - b.position.y)
-      .forEach((node, row) =>
-        positions.set(node.id, {
-          x: minX + level * COLUMN_GAP,
-          y: minY + row * ROW_GAP,
-        }),
-      );
+  let x = minX;
+  for (const { column } of depthColumns(steps, snapshot.edges)) {
+    let y = minY;
+    let widest = CARD_WIDTH;
+    for (const node of column) {
+      positions.set(node.id, { x: Math.round(x), y: Math.round(y) });
+      const size = sizes.get(node.id) ?? storedSize(node);
+      widest = Math.max(widest, size.width);
+      y += Math.max(ROW_GAP, size.height + 80);
+    }
+    x += Math.max(COLUMN_GAP, widest + 80);
   }
-  return positions;
+  return { positions, sizes };
 }
 
 /* ---------- connection rules ---------- */
@@ -605,9 +945,12 @@ export function useFlowDocument({
 
   const setCanvas = useCallback(
     (nextNodes: EditorNode[], nextEdges: EditorEdge[]) => {
-      nodesRef.current = nextNodes;
+      // Every write lands here, so this is where the one invariant React
+      // Flow has about containers is kept: a parent before its children.
+      const ordered = orderByParent(nextNodes);
+      nodesRef.current = ordered;
       edgesRef.current = nextEdges;
-      setNodes(nextNodes);
+      setNodes(ordered);
       setEdges(nextEdges);
     },
     [],
@@ -647,8 +990,17 @@ export function useFlowDocument({
       setCanvas(
         snap.nodes.map((node) => {
           const previous = before.get(node.id);
+          // A resized note or container carries its size on the React Flow
+          // node rather than inside `data.node`, so the sizes are compared
+          // too: without it, undoing a resize would leave the new size on a
+          // card whose stored copy had not changed.
+          const resized =
+            !!previous &&
+            ((previous.width ?? undefined) !== node.width ||
+              (previous.height ?? undefined) !== node.height);
           if (
             previous &&
+            !resized &&
             previous.position.x === node.position.x &&
             previous.position.y === node.position.y &&
             JSON.stringify(previous.data.node) === JSON.stringify(node)
@@ -661,7 +1013,9 @@ export function useFlowDocument({
               previous?.data.problems ?? [],
               previous,
             ),
-            ...carryMeasured(previous),
+            // A stale measurement would fight the size being restored;
+            // React Flow measures the new one on the next frame.
+            ...(resized ? {} : carryMeasured(previous)),
           };
         }),
         snap.edges.map(toEditorEdge),
@@ -896,6 +1250,9 @@ export function useFlowDocument({
         {
           dots: workspaceRef.current.dots,
           spaces: workspaceRef.current.spaces,
+          // Catches a Run flow step pointing at this very flow as it is
+          // drawn; a loop through another flow is caught on publish.
+          flowId: flow.id,
         },
       );
       if (JSON.stringify(found) !== JSON.stringify(problemsRef.current))
@@ -1017,7 +1374,10 @@ export function useCanvasEdits(
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
   const removeNodes = useCallback(
-    (ids: string[], edgeIds: string[] = []) => {
+    (requested: string[], edgeIds: string[] = []) => {
+      // Deleting a container deletes the steps inside it: half a loop body
+      // left behind would be a flow nobody meant to draw.
+      const ids = withBodies(nodesRef.current, requested);
       // A flow keeps at least one Start; the last one cannot be deleted.
       const starts = nodesRef.current
         .filter((n) => n.data.node.type === 'start')
@@ -1040,22 +1400,26 @@ export function useCanvasEdits(
     },
     [mutate, nodesRef, notify],
   );
-  const removeSelected = useCallback(
-    () =>
-      removeNodes(
-        nodesRef.current.filter((n) => n.selected).map((n) => n.id),
-        edgesRef.current.filter((e) => e.selected).map((e) => e.id),
-      ),
-    [edgesRef, nodesRef, removeNodes],
-  );
-  /** The named steps with the edges between them. */
+  /**
+   * The named steps with the edges between them. A container brings its body
+   * along; a body node copied on its own leaves the loop, so it comes out in
+   * absolute coordinates with no container.
+   */
   const subgraph = useCallback(
     (ids: string[]) => {
-      const picked = nodesRef.current.filter((n) => ids.includes(n.id));
-      const set = new Set(picked.map((n) => n.id));
+      const wanted = new Set(withBodies(nodesRef.current, ids));
+      const picked = nodesRef.current
+        .filter((n) => wanted.has(n.id))
+        .map((n) =>
+          n.parentId && !wanted.has(n.parentId)
+            ? setMembership(n, undefined, absoluteOf(nodesRef.current, n))
+            : n,
+        );
       return serializeCanvas(
         picked,
-        edgesRef.current.filter((e) => set.has(e.source) && set.has(e.target)),
+        edgesRef.current.filter(
+          (e) => wanted.has(e.source) && wanted.has(e.target),
+        ),
       );
     },
     [edgesRef, nodesRef],
@@ -1070,16 +1434,19 @@ export function useCanvasEdits(
       );
       if (room) return notify(room);
       const clone = cloneSubgraph(snap.nodes, snap.edges, offset);
-      mutate((current, currentEdges) => ({
-        nodes: [
-          ...deselect(current),
-          ...clone.nodes.map((node) => ({
-            ...toEditorNode(node, workspaceRef.current, []),
-            selected: true,
-          })),
-        ],
-        edges: [...currentEdges, ...clone.edges.map(toEditorEdge)],
-      }));
+      mutate((current, currentEdges) => {
+        const added = clone.nodes.map((node) => ({
+          ...toEditorNode(node, workspaceRef.current, []),
+          selected: true,
+        }));
+        // A copy that lands over a For each joins its body, the same as a
+        // step dragged there; the copy of a container keeps its own.
+        const landed = added.filter((node) => !node.parentId).map((n) => n.id);
+        return {
+          nodes: reparentNodes([...deselect(current), ...added], landed).nodes,
+          edges: [...currentEdges, ...clone.edges.map(toEditorEdge)],
+        };
+      });
     },
     [edgesRef, mutate, nodesRef, notify],
   );
@@ -1108,19 +1475,34 @@ export function useCanvasEdits(
   );
   const nudge = useCallback(
     (dx: number, dy: number) =>
-      mutate(
-        (current) => ({
-          nodes: current.map((n) =>
-            n.selected
-              ? {
-                  ...n,
-                  position: { x: n.position.x + dx, y: n.position.y + dy },
-                }
-              : n,
-          ),
-        }),
-        'nudge',
-      ),
+      mutate((current) => {
+        // A body node whose container is moving too already travels with
+        // it: nudging both would move it twice.
+        const moving = new Set(
+          current.filter((n) => n.selected).map((n) => n.id),
+        );
+        const shifted: string[] = [];
+        const nudged = current.map((n) => {
+          if (!n.selected || (n.parentId && moving.has(n.parentId))) return n;
+          shifted.push(n.id);
+          const position = { x: n.position.x + dx, y: n.position.y + dy };
+          // A child cannot be stored outside its own body: React Flow clamps
+          // only what it draws, so an unclamped position and the drawn card
+          // would drift apart and jump when the container is resized.
+          const parent = n.parentId
+            ? current.find((item) => item.id === n.parentId)
+            : undefined;
+          return {
+            ...n,
+            position: parent
+              ? clampToBody(parent, editorSize(n), position)
+              : position,
+          };
+        });
+        // The keyboard decides membership the same way a drag does, so the
+        // same final geometry means the same thing on both.
+        return { nodes: reparentNodes(nudged, shifted).nodes };
+      }, 'nudge'),
     [mutate],
   );
   const collapseSelected = useCallback(
@@ -1139,13 +1521,23 @@ export function useCanvasEdits(
     [mutate],
   );
   const tidy = useCallback(() => {
-    const positions = tidyLayout(
+    const { positions, sizes } = tidyLayout(
       serializeCanvas(nodesRef.current, edgesRef.current),
     );
     mutate((current) => ({
-      nodes: current.map((n) =>
-        positions.has(n.id) ? { ...n, position: positions.get(n.id)! } : n,
-      ),
+      nodes: current.map((n) => {
+        const position = positions.get(n.id);
+        const size = sizes.get(n.id);
+        if (!position && !size) return n;
+        const node = { ...n.data.node, ...(position ? { position } : {}) };
+        if (size) Object.assign(node, size);
+        return {
+          ...n,
+          ...(position ? { position } : {}),
+          ...(size ?? {}),
+          data: { ...n.data, node },
+        };
+      }),
     }));
     window.requestAnimationFrame(
       () => void rf.fitView({ padding: 0.2, maxZoom: 1, duration: motionMs() }),
@@ -1162,7 +1554,8 @@ export function useCanvasEdits(
             e.selected ? { ...e, selected: false } : e,
           ),
         );
-        void rf.setCenter(node.position.x + 120, node.position.y + 60, {
+        const at = absoluteOf(nodesRef.current, node);
+        void rf.setCenter(at.x + 120, at.y + 60, {
           zoom: Math.max(rf.getZoom(), 1),
           duration: motionMs(),
         });
@@ -1180,7 +1573,6 @@ export function useCanvasEdits(
   );
   return {
     removeNodes,
-    removeSelected,
     copySelection,
     paste,
     duplicateNodes,

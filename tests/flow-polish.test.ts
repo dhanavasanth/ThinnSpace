@@ -208,8 +208,12 @@ it('warns at design time about a Slack-destined Send message', () => {
   // Saving the draft stays allowed: the Slack problem is never an error.
   expect(codes(graph)).not.toContain('error:slack-proactive-unavailable');
 
+  // Replying in the thread that started the run is implemented, so it is no
+  // longer a Slack-unavailable warning; what it needs is a Slack Start, and
+  // this graph starts manually.
   send.config.destination = 'thread';
-  expect(codes(graph)).toContain('warning:slack-proactive-unavailable');
+  expect(codes(graph)).not.toContain('warning:slack-proactive-unavailable');
+  expect(codes(graph)).toContain('warning:reply-without-slack-start');
 
   send.config.destination = 'inbox';
   expect(codes(graph)).not.toContain('warning:slack-proactive-unavailable');

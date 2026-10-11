@@ -41,7 +41,7 @@ const CATEGORY_BLURB: Record<string, string> = {
   logic: 'Branch, combine and route the flow',
   people: 'Bring a person into the loop',
   notes: 'Leave a note on the canvas',
-  team: 'Dot teams, loops and waits arrive in a later release',
+  team: 'Dot teams, loops, sub-flows, computer work and waits',
 };
 export function categoryBlurb(category: NodeCategory) {
   return (
@@ -79,6 +79,15 @@ export function catalogGroups(workspace: WorkspaceState): PanelGroup[] {
 /** Listed for discoverability but not executable yet. */
 export function isComingSoon(item: Pick<PanelItem, 'type'>) {
   return !!NODE_SPECS[item.type]?.comingSoon;
+}
+/**
+ * A whole category still waiting on the engine, read from the catalog's
+ * `comingSoon` flags rather than from a list of category ids: as the engine
+ * implements these nodes the flags go, the group stops being dimmed, and a
+ * node that has moved to its real category is simply addable there.
+ */
+export function categorySoon(group: PanelGroup) {
+  return group.items.length > 0 && group.items.every(isComingSoon);
 }
 /** Items whose inputs can take a `kind` output. */
 export function acceptsKind(item: Pick<PanelItem, 'type'>, kind: PortKind) {
@@ -359,7 +368,7 @@ export function NodePanel({
           const isActive = index === active;
           if (row.kind === 'category') {
             const { category: cat, items } = row.group;
-            const soon = cat.id === 'team';
+            const soon = categorySoon(row.group);
             const Icon = nodeIcon(cat.nodes[0]?.icon);
             return (
               <button
