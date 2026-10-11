@@ -1,7 +1,7 @@
 {
-  "name": "opendots",
+  "name": "thinnspace",
   "version": "0.1.0",
-  "description": "A self-hosted personal-agent template with CopilotKit Intelligence, Threads, and Channels.",
+  "description": "ThinnSpace by ThinnAIQ: self-hosted AI coworkers, their documents, and the flows that connect them.",
   "main": "index.js",
   "directories": {
     "doc": "docs",
@@ -20,7 +20,7 @@
     "check-format": "prettier --check src tests *.json *.ts *.js index.html public .github Dockerfile \"compose*.yml\" deployment README.md docs .env.example --ignore-unknown"
   },
   "keywords": [],
-  "author": "Atai Barkai",
+  "author": "ThinnAIQ",
   "license": "MIT",
   "type": "module",
   "dependencies": {
@@ -81,7 +81,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/CopilotKit/OpenDots.git"
+    "url": "git+https://github.com/DhanaVazanth/ThinnSpace.git"
   },
   "overrides": {
     "undici": "^6.29.0"
