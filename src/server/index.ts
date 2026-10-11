@@ -111,6 +111,7 @@ app.get('*', serveStatic({ path: './dist/client/index.html' }));
 const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
   console.log(`OpenDots template listening on http://${host}:${info.port}`);
   runner.start();
+  platform.runner.startScheduler();
   void platform
     .start()
     .catch((error) =>
@@ -121,7 +122,10 @@ const server = serve({ fetch: app.fetch, hostname: host, port }, (info) => {
     );
 });
 const shutdown = createShutdown({
-  stopRunner: () => runner.stop(),
+  stopRunner: () => {
+    runner.stop();
+    platform.runner.stop();
+  },
   stopPlatform: () => platform.stop(),
   closeServer: () =>
     new Promise<void>((resolve, reject) =>

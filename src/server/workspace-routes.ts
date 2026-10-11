@@ -1,4 +1,8 @@
 import { setupInputSchema } from './setup-telemetry.js';
+import { isBuiltinAvatar } from '../shared/avatars.js';
+import { MAX_AVATAR_BYTES } from './avatar-store.js';
+import { flowRoutes } from './flow-routes.js';
+import { flowRunRoutes } from './flow-run-routes.js';
 import { pageRoutes } from './page-routes.js';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -18,11 +22,14 @@ const dotSchema = z
     skillDeliveryEnabled: z.boolean().optional(),
     spaceIds: z.array(z.string().min(1)).min(1).max(100).optional(),
     spaceId: z.string().min(1).optional(),
+    avatar: z.string().min(1).max(80).nullable().optional(),
   })
   .strict();
 export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   const app = new Hono();
   app.route('/', pageRoutes(platform));
+  app.route('/', flowRunRoutes(platform));
+  app.route('/', flowRoutes(platform));
   app.post('/setup-telemetry', async (c) => {
     const parsed = setupInputSchema.safeParse(
       await c.req.json().catch(() => null),
@@ -43,10 +50,49 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
     c.json({
       spaces: platform.workspace.spaces(),
       dots: platform.workspace.dots(),
+      avatars: platform.workspace.avatars.list(),
+      flows: platform.workspace.flows.list(),
       conversations: platform.workspace.conversations(),
       setup: platform.setup(),
       calls: platform.workspace.calls(),
     }),
+  );
+  const validAvatar = (id: string | null | undefined) =>
+    id == null || isBuiltinAvatar(id) || platform.workspace.avatars.has(id);
+  app.get('/avatars', (c) => c.json(platform.workspace.avatars.list()));
+  app.post('/avatars', async (c) => {
+    const data = z
+      .object({
+        label: z.string().trim().min(1).max(40),
+        image: z
+          .string()
+          .regex(/^data:image\/png;base64,[A-Za-z0-9+/]+=*$/)
+          .max(Math.ceil((MAX_AVATAR_BYTES * 4) / 3) + 64),
+      })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null));
+    if (!data.success)
+      return c.json(
+        { error: 'Provide a label and a PNG image up to 700 KB.' },
+        400,
+      );
+    try {
+      const png = Buffer.from(data.data.image.split(',')[1], 'base64');
+      return c.json(
+        platform.workspace.avatars.create(data.data.label, png),
+        201,
+      );
+    } catch (error) {
+      return c.json(
+        { error: error instanceof Error ? error.message : 'Invalid avatar.' },
+        400,
+      );
+    }
+  });
+  app.delete('/avatars/:id', (c) =>
+    platform.workspace.avatars.remove(c.req.param('id'))
+      ? c.json({ ok: true })
+      : c.json({ error: 'Avatar not found.' }, 404),
   );
   app.post('/spaces', async (c) => {
     const data = z
@@ -78,6 +124,8 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         },
         400,
       );
+    if (!validAvatar(data.data.avatar))
+      return c.json({ error: 'Unknown avatar.' }, 400);
     try {
       validateLearningSettings(
         data.data.learningContainerId ?? null,
@@ -104,6 +152,7 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
         data.data.spaceIds,
         data.data.learningContainerId,
         data.data.skillDeliveryEnabled,
+        data.data.avatar ?? null,
       ),
       201,
     );
@@ -114,6 +163,8 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
       return c.json({ error: 'Invalid specialist settings.' }, 400);
     const current = platform.workspace.dot(c.req.param('id'));
     if (!current) return c.json({ error: 'Dot not found.' }, 404);
+    if (!validAvatar(data.data.avatar))
+      return c.json({ error: 'Unknown avatar.' }, 400);
     try {
       validateLearningSettings(
         data.data.learningContainerId === undefined

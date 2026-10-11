@@ -1,3 +1,4 @@
+import { BRAND } from '../shared/brand.js';
 import {
   createChannel,
   type ChannelIdentityContext,
@@ -40,7 +41,7 @@ export function slackIdentity(
     !config.slackUsers.includes(context.actor.id)
   )
     return null;
-  return { id: ownerId, name: 'OpenDots owner' };
+  return { id: ownerId, name: `${BRAND.name} owner` };
 }
 type Turn = {
   thread: Pick<Thread, 'runAgent' | 'post' | 'subscribe' | 'isSubscribed'>;
@@ -75,7 +76,7 @@ export function slackHandlers(options: {
     if (options.paused()) {
       await notice(
         thread,
-        'OpenDots is paused. Resume it in the app before asking me to continue.',
+        `${BRAND.name} is paused. Resume it in the app before asking me to continue.`,
       );
       return;
     }
@@ -85,7 +86,7 @@ export function slackHandlers(options: {
       const runError = safeFailure(error);
       try {
         await thread.post(
-          'I couldn’t complete that request. Please check OpenDots and send a new message when you’re ready to try again.',
+          `I couldn’t complete that request. Please check ${BRAND.name} and send a new message when you’re ready to try again.`,
         );
       } catch (postError) {
         const replyError = safeFailure(postError);

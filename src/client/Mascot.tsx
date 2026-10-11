@@ -1,3 +1,4 @@
+import { avatarSrc } from '../shared/avatars';
 const characters = ['blue', 'mint', 'orange', 'purple'] as const;
 
 /** Stable identity keeps each specialist recognizable across views and reloads. */
@@ -13,12 +14,15 @@ export function Mascot({
   state = 'idle',
   small = false,
   identity,
+  avatar,
   name = 'Dot',
   decorative = false,
 }: {
   state?: string;
   small?: boolean;
   identity?: string;
+  /** Explicit character; falls back to a stable pick from identity. */
+  avatar?: string | null;
   name?: string;
   decorative?: boolean;
 }) {
@@ -26,7 +30,7 @@ export function Mascot({
     <span className={`mascot ${state} ${small ? 'small' : ''}`}>
       <img
         className="dot-body"
-        src={`/dots/${characterFor(identity)}.png`}
+        src={avatar ? avatarSrc(avatar) : `/dots/${characterFor(identity)}.png`}
         alt={decorative ? '' : `${name} is ${state}`}
         width={512}
         height={512}

@@ -4280,3 +4280,190 @@ h3 {
   overflow-wrap: anywhere;
   font-size: 11px;
 }
+
+/* Per-Dot avatar picker in the specialist editor. */
+.avatar-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+.avatar-option {
+  padding: 6px;
+  border: 2px solid var(--line);
+  border-radius: 14px;
+  background: transparent;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    transform 0.15s ease;
+}
+.avatar-option:hover {
+  transform: translateY(-2px);
+}
+.avatar-option.selected {
+  border-color: var(--blue);
+  background: var(--lavender);
+}
+.avatar-cell {
+  position: relative;
+}
+.avatar-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: #fff;
+  color: var(--muted);
+  cursor: pointer;
+}
+.avatar-remove:hover {
+  color: var(--ink);
+}
+.avatar-upload {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 66px;
+  height: 66px;
+  border-style: dashed;
+  color: var(--muted);
+  font-size: 11px;
+}
+.avatar-upload:disabled {
+  cursor: progress;
+}
+
+/* ThinnSpace brand layer: tangy orange accent on a white base. Sits last so
+   it wins over the template's ink accent; the dark theme derives from it. */
+.template-app {
+  --orange: #ff6a1f;
+  --orange-deep: #e4560f;
+  --orange-tint: #fff1e8;
+  --orange-line: #ffd4bd;
+  --accent: #ff6a1f;
+  --accent-hover: #e4560f;
+  --blue: #ff6a1f;
+  --blue-dark: #e4560f;
+  --lavender: #fff1e8;
+}
+.template-app.app,
+.template-app.app .sidebar,
+.template-app .icon-rail {
+  background: #fff;
+}
+.icon-rail .rail-brand {
+  color: #ff6a1f;
+}
+.rail-brand span {
+  color: #3a2418;
+}
+.dotted-logo i {
+  background: #ffb48a;
+}
+.dotted-logo i:first-child {
+  background: #ff6a1f;
+}
+.template-app .wordmark {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+.wordmark-by {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  color: #a0a0ac;
+}
+.template-app .nav-item.active,
+.template-app .dot-nav.active,
+.template-app .thread-item.active {
+  background: #fff1e8;
+  color: #c84a0a;
+}
+.template-app .nav-item.active small {
+  background: #ffd4bd;
+}
+.template-app .page-tree-item.active {
+  background: #fff1e8;
+  color: #c84a0a;
+}
+.template-app .dot-nav-mark {
+  background: #ffb48a;
+}
+.template-app .primary,
+.template-app .send-button:not(:disabled) {
+  background: #ff6a1f;
+  border-color: #ff6a1f;
+  color: #fff;
+}
+.template-app .primary:hover:not(:disabled),
+.template-app .send-button:hover:not(:disabled) {
+  background: #e4560f;
+  border-color: #e4560f;
+}
+.template-app a {
+  color: #d9530c;
+}
+.template-app input:focus,
+.template-app textarea:focus,
+.template-app select:focus {
+  border-color: #ff6a1f;
+}
+.avatar-option.selected {
+  border-color: #ff6a1f;
+  background: #fff1e8;
+}
+
+/* theme: fixed .thinnspace-dark */
+/* Dark mode keeps the orange vivid; the auto-derived flip is too dim for
+   focus rings and controls on a near-black surface. The doubled class
+   matches the specificity the generated dark rules gain from :not(). */
+:root[data-theme='dark'] .app.template-app {
+  --accent: #ff7a3d;
+  --accent-hover: #ff9361;
+  --blue: #ff7a3d;
+  --blue-dark: #ff9361;
+  --lavender: #2b1f17;
+}
+:root[data-theme='dark'] .app.template-app .primary,
+:root[data-theme='dark'] .app.template-app .send-button:not(:disabled) {
+  background: #ff7a3d;
+  border-color: #ff7a3d;
+  color: #1a120d;
+}
+:root[data-theme='dark'] .app.template-app .primary:hover:not(:disabled),
+:root[data-theme='dark'] .app.template-app .send-button:hover:not(:disabled) {
+  background: #ff9361;
+  border-color: #ff9361;
+}
+:root[data-theme='dark'] .app.template-app a {
+  color: #ff9a6b;
+}
+:root[data-theme='dark'] .app.template-app .icon-rail .rail-brand {
+  color: #ff7a3d;
+}
+:root[data-theme='dark'] .app.template-app .rail-brand span {
+  color: #ffd4bd;
+}
+:root[data-theme='dark'] .app.template-app .nav-item.active,
+:root[data-theme='dark'] .app.template-app .dot-nav.active,
+:root[data-theme='dark'] .app.template-app .thread-item.active,
+:root[data-theme='dark'] .app.template-app .page-tree-item.active {
+  background: #2b1f17;
+  color: #ffb48a;
+}
+:root[data-theme='dark'] .app.template-app .avatar-option.selected {
+  border-color: #ff7a3d;
+  background: #2b1f17;
+}
+/* theme: end */

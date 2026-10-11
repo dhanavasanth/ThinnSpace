@@ -1,0 +1,651 @@
+/* Node cards and edges on the Flows canvas (n8n-style icon squares).
+   Every colour is a hex literal so the build-time dark theme can flip it.
+   Rules are scoped under .flow-editor so they win over the generic button
+   and handle rules in flow-editor.css. */
+
+/* ---------- step card ---------- */
+.flow-editor .fnode {
+  position: relative;
+  width: 96px;
+  --fnode-ports: 1;
+  --fnode-color: #94a3b8;
+}
+.flow-editor .fnode-square {
+  position: relative;
+  width: 96px;
+  height: max(96px, calc(var(--fnode-ports) * 24px + 16px));
+  border-radius: 16px;
+  background: #ffffff;
+  border: 1px solid #e9e8e6;
+  box-shadow:
+    0 1px 2px #1f232908,
+    0 6px 16px #1f23290f;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    box-shadow 0.15s ease,
+    border-color 0.15s ease,
+    background 0.2s ease;
+}
+.flow-editor .fnode.is-start .fnode-square {
+  border-radius: 48px 16px 16px 48px;
+}
+.flow-editor .fnode.is-soon .fnode-square {
+  border-style: dashed;
+}
+.flow-editor .fnode:hover .fnode-square {
+  border-color: #d6d4d0;
+  box-shadow:
+    0 2px 4px #1f23290a,
+    0 10px 24px #1f232914;
+}
+/* Selection uses the outline so status rings keep the box-shadow slot. */
+.flow-editor .fnode.selected .fnode-square {
+  outline: 2px solid #ff6a1f;
+  outline-offset: 1px;
+  box-shadow:
+    0 0 0 7px #ff6a1f1f,
+    0 6px 16px #1f23290f;
+}
+.flow-editor .react-flow__node:focus-visible .fnode-square,
+.flow-editor .fnode:focus-visible .fnode-square {
+  outline: 2px solid #ff6a1f;
+  outline-offset: 3px;
+}
+.flow-editor .fnode:focus-visible {
+  outline: none;
+}
+
+/* Icon or avatar in the middle of the square. */
+.flow-editor .fnode-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fnode-color);
+  pointer-events: none;
+}
+.flow-editor .fnode-glyph .mascot.small {
+  width: 56px;
+  height: 56px;
+  background: transparent;
+}
+/* Category glyph badge on avatar cards. */
+.flow-editor .fnode-cat {
+  position: absolute;
+  right: -6px;
+  bottom: -6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 1px solid #e9e8e6;
+  color: var(--fnode-color);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 3px #1f232914;
+  pointer-events: none;
+}
+
+/* ---------- status ring and badges ---------- */
+.flow-editor .fnode[data-status='running'] .fnode-square {
+  border-color: #ff6a1f;
+  box-shadow:
+    0 0 0 3px #ff6a1f33,
+    0 6px 16px #1f23290f;
+  animation: fnode-ring 1.4s ease-in-out infinite;
+}
+.flow-editor .fnode[data-status='waiting'] .fnode-square {
+  border-color: #f59e0b;
+  box-shadow:
+    0 0 0 3px #f59e0b2e,
+    0 6px 16px #1f23290f;
+}
+.flow-editor .fnode[data-status='completed'] .fnode-square {
+  border-color: #22c55e;
+  box-shadow:
+    0 0 0 3px #22c55e24,
+    0 6px 16px #1f23290f;
+}
+.flow-editor .fnode[data-status='failed'] .fnode-square {
+  border-color: #e11d48;
+  box-shadow:
+    0 0 0 3px #e11d4826,
+    0 6px 16px #1f23290f;
+}
+.flow-editor .fnode[data-status='skipped'] {
+  opacity: 0.5;
+}
+@keyframes fnode-ring {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 3px #ff6a1f33,
+      0 6px 16px #1f23290f;
+  }
+  50% {
+    box-shadow:
+      0 0 0 7px #ff6a1f14,
+      0 6px 16px #1f23290f;
+  }
+}
+.flow-editor .fnode-status {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  box-shadow: 0 0 0 2px #ffffff;
+  z-index: 2;
+  pointer-events: none;
+}
+.flow-editor .fnode-status.running {
+  background: #ff6a1f;
+}
+.flow-editor .fnode-status.running svg {
+  animation: fnode-spin 0.9s linear infinite;
+}
+.flow-editor .fnode-status.waiting {
+  background: #f59e0b;
+}
+.flow-editor .fnode-status.completed {
+  background: #22c55e;
+}
+.flow-editor .fnode-status.failed {
+  background: #e11d48;
+}
+@keyframes fnode-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Validation dot, top-left; drops to the bottom while the step badge is up. */
+.flow-editor .fnode-problem {
+  position: absolute;
+  top: -5px;
+  left: -5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px #ffffff;
+  cursor: help;
+  z-index: 2;
+}
+.flow-editor .fnode-problem.error {
+  background: #e11d48;
+}
+.flow-editor .fnode-problem.warning {
+  background: #f59e0b;
+}
+.flow-editor .fnode.previewing .fnode-problem {
+  top: auto;
+  bottom: -5px;
+}
+
+/* ---------- run-order preview ---------- */
+.flow-editor .fnode.previewing .fnode-square {
+  background: var(--wave-tint, #ffffff);
+}
+.flow-editor .fnode.wave-0 {
+  --wave-tint: #fff4ec;
+}
+.flow-editor .fnode.wave-1 {
+  --wave-tint: #eef5ff;
+}
+.flow-editor .fnode.wave-2 {
+  --wave-tint: #eefbf1;
+}
+.flow-editor .fnode.wave-3 {
+  --wave-tint: #f6f0ff;
+}
+.flow-editor .fnode.wave-4 {
+  --wave-tint: #fffbe6;
+}
+.flow-editor .fnode.wave-5 {
+  --wave-tint: #eafafa;
+}
+.flow-editor .fnode-step {
+  position: absolute;
+  left: -10px;
+  top: -10px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #ff6a1f;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow:
+    0 0 0 2px #ffffff,
+    0 2px 6px #ff6a1f55;
+  z-index: 3;
+  pointer-events: none;
+}
+.flow-editor .fnode-waits {
+  position: absolute;
+  left: 50%;
+  top: -9px;
+  transform: translateX(-50%);
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #ffffff;
+  border: 1px solid #ffc5a6;
+  color: #c2410c;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* ---------- ports ---------- */
+.flow-editor .fnode-ins,
+.flow-editor .fnode-outs {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+}
+.flow-editor .fnode-ins {
+  left: 0;
+}
+.flow-editor .fnode-outs {
+  right: 0;
+}
+.flow-editor .fnode-in,
+.flow-editor .fnode-out {
+  position: relative;
+  width: 0;
+  height: 18px;
+}
+.flow-editor .react-flow__handle.fnode-handle {
+  min-width: 0;
+  min-height: 0;
+  pointer-events: all;
+  transition: transform 0.12s ease;
+}
+/* Input: a small grey rectangle on the left edge. */
+.flow-editor .react-flow__handle.fnode-handle.in {
+  width: 8px;
+  height: 16px;
+  border-radius: 4px;
+  background: #9a9ca6;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px #d4d4d8;
+}
+/* Output: a port-coloured circle with a white ring. */
+.flow-editor .react-flow__handle.fnode-handle.out {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid #ffffff;
+  box-shadow: 0 0 0 1px #d4d4d8;
+}
+/* React Flow positions each side with its own transform; keep it per side. */
+.flow-editor .react-flow__handle.fnode-handle.react-flow__handle-left:hover {
+  transform: translate(-50%, -50%) scale(1.3);
+}
+.flow-editor .react-flow__handle.fnode-handle.react-flow__handle-right:hover {
+  transform: translate(50%, -50%) scale(1.3);
+}
+.flow-editor .fnode-in-tail,
+.flow-editor .fnode-out-tail {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1;
+  color: #6f717c;
+}
+.flow-editor .fnode-in-tail {
+  right: 12px;
+}
+.flow-editor .fnode-out-tail {
+  left: 12px;
+}
+/* Backed with the canvas colour so the label stays legible over the line
+   that leaves or arrives at the handle. */
+.flow-editor .fnode-port-label {
+  position: relative;
+  z-index: 1;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #fafaf9;
+}
+.flow-editor .fnode-out-add {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid #d4d4d8;
+  background: #ffffff;
+  color: #8c8d97;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.flow-editor .fnode:hover .fnode-out-add,
+.flow-editor .fnode-out-add:focus-visible {
+  opacity: 1;
+}
+.flow-editor .fnode-out-add:hover {
+  border-color: #ff6a1f;
+  color: #ff6a1f;
+}
+
+/* ---------- label block under the square ---------- */
+.flow-editor .fnode-text {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 180px;
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  text-align: center;
+}
+.flow-editor .fnode-label {
+  max-width: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: #333641;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.flow-editor .fnode-sub {
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.3;
+  color: #6f717c;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.flow-editor .fnode-rename {
+  width: 100%;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  padding: 2px 6px;
+  border: 1px solid #ff6a1f;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #333641;
+  outline: none;
+}
+.flow-editor .fnode-chips {
+  display: flex;
+  justify-content: center;
+  gap: 4px;
+  margin-top: 2px;
+  max-width: 100%;
+}
+.flow-editor .fnode-chip {
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #f3f2f0;
+  color: #5b5f6b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 88px;
+}
+.flow-editor .fnode-token {
+  display: inline-block;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #fff1e8;
+  color: #c2410c;
+  font-size: 11px;
+  font-weight: 500;
+}
+/* "Note shown on the card" (Advanced), one line under the chips. */
+.flow-editor .fnode-note {
+  max-width: 100%;
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: #8c8d97;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- hover toolbar ---------- */
+.flow-editor .fnode-toolbar {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  background: #ffffff;
+  border: 1px solid #e9e8e6;
+  border-radius: 8px;
+  box-shadow:
+    0 1px 2px #1f232908,
+    0 6px 18px #1f232910;
+}
+.flow-editor .fnode-toolbar button {
+  border: 0;
+  background: none;
+  padding: 5px;
+  border-radius: 6px;
+  color: #6b6f7c;
+}
+.flow-editor .fnode-toolbar button:hover:not(:disabled) {
+  background: #f3f2f0;
+  color: #333641;
+}
+.flow-editor .fnode-toolbar button:disabled {
+  opacity: 0.4;
+}
+
+/* ---------- sticky notes ---------- */
+.flow-editor .fnote {
+  width: 100%;
+  height: 100%;
+  min-width: 160px;
+  min-height: 90px;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  box-shadow:
+    0 1px 2px #1f232910,
+    0 4px 12px #1f23290a;
+  background: #fff4d6;
+  color: #5a4a1a;
+  transition: box-shadow 0.15s ease;
+}
+.flow-editor .fnote.tone-amber {
+  background: #fff4d6;
+}
+.flow-editor .fnote.tone-orange {
+  background: #ffe6d6;
+  color: #6b3a1a;
+}
+.flow-editor .fnote.tone-mint {
+  background: #ddf5ea;
+  color: #1f4d3a;
+}
+.flow-editor .fnote.tone-sky {
+  background: #ddeffb;
+  color: #1c3f5c;
+}
+.flow-editor .fnote.tone-grey {
+  background: #ececea;
+  color: #4b4f5c;
+}
+.flow-editor .fnote.selected {
+  outline: 2px solid #ff6a1f;
+  outline-offset: 1px;
+  box-shadow: 0 0 0 7px #ff6a1f1f;
+}
+.flow-editor .fnote.previewing {
+  opacity: 0.4;
+}
+.flow-editor .react-flow__node:focus-visible .fnote {
+  outline: 2px solid #ff6a1f;
+  outline-offset: 3px;
+}
+.flow-editor .fnote-grip {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  opacity: 0.45;
+  cursor: grab;
+}
+.flow-editor .fnote textarea {
+  flex: 1;
+  width: 100%;
+  resize: none;
+  border: 0;
+  background: transparent;
+  padding: 0 12px 12px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: inherit;
+  outline: none;
+  font-family: inherit;
+}
+.flow-editor .fnote textarea::placeholder {
+  color: inherit;
+  opacity: 0.5;
+}
+.flow-editor .react-flow__resize-control.fnote-resize-line {
+  border-color: #ff6a1f;
+}
+.flow-editor .react-flow__resize-control.fnote-resize-handle {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: #ffffff;
+  border: 1.5px solid #ff6a1f;
+}
+
+/* ---------- edges ---------- */
+/* Resting edges use the brand muted grey (about 3:1 on the canvas) so they
+   read as connections rather than as part of the dot grid. */
+.flow-editor .fedge .react-flow__edge-path {
+  stroke: #8c8d97;
+  stroke-width: 2;
+  transition: stroke-width 0.12s ease;
+}
+.flow-editor .fedge.active .react-flow__edge-path {
+  stroke-width: 2.5;
+}
+.flow-editor .fedge-arrow {
+  fill: #8c8d97;
+}
+.flow-editor .fedge.active .fedge-arrow {
+  fill: #ff6a1f;
+}
+.flow-editor .fedge-stop-a {
+  stop-color: #ff6a1f;
+}
+.flow-editor .fedge-stop-b {
+  stop-color: #ff9a66;
+}
+.flow-editor .react-flow__edge.has-problem .fedge .react-flow__edge-path {
+  stroke: #e11d48 !important;
+  stroke-dasharray: 6 4;
+}
+.flow-editor .react-flow__edge.has-problem .fedge .fedge-arrow {
+  fill: #e11d48;
+}
+.flow-editor .fedge-label {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  pointer-events: all;
+}
+.flow-editor .fedge-label.at-mid {
+  z-index: 1;
+}
+.flow-editor .fedge-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  padding: 1px 7px 1px 5px;
+  border-radius: 999px;
+  border: 1px solid #e9e8e6;
+  background: #ffffff;
+  color: #4b4f5c;
+  white-space: nowrap;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.flow-editor .fedge-label.active .fedge-pill {
+  border-color: #ff6a1f;
+  color: #c2410c;
+}
+.flow-editor .fedge-pill-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.flow-editor .fedge-delete {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+  border: 1px solid #e9e8e6;
+  color: #6b6f7c;
+  opacity: 0;
+  transform: scale(0.8);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+}
+.flow-editor .fedge-label.active .fedge-delete {
+  opacity: 1;
+  transform: scale(1);
+}
+.flow-editor .fedge-delete:hover {
+  border-color: #b42318;
+  color: #b42318;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-editor .fnode-square,
+  .flow-editor .fnode-status svg {
+    animation: none !important;
+  }
+}

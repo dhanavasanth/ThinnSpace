@@ -1,5 +1,6 @@
 import { ComputerService } from './computer-service.js';
 import { ConnectionService } from './connections.js';
+import { FlowRunner } from './flow-runner.js';
 import { PageService } from './page-service.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -28,6 +29,7 @@ export class Platform {
   readonly pages: PageService;
   readonly computers: ComputerService;
   readonly connections: ConnectionService;
+  readonly runner: FlowRunner;
   readonly intelligence?: CopilotKitIntelligence;
   readonly handler?: CopilotHonoApp;
   constructor(
@@ -42,6 +44,7 @@ export class Platform {
       () => store.settings().paused,
     );
     this.connections = new ConnectionService(workspace.connections);
+    this.runner = new FlowRunner(this);
     this.pages = new PageService(workspace, () => {
       this.requireReady();
       return this.intelligence!;

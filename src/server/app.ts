@@ -90,6 +90,17 @@ export function createApp({
       return c.json({ error: 'Use application/json.' }, 415);
     await next();
   });
+  // Uploaded avatars load through <img>, which cannot send the owner token.
+  if (platform)
+    app.get('/avatars/:file{.+\\.png$}', (c) => {
+      const id = c.req.param('file').slice(0, -4);
+      const png = platform.workspace.avatars.image(id);
+      if (!png) return c.text('Not found.', 404);
+      c.header('Content-Type', 'image/png');
+      c.header('X-Content-Type-Options', 'nosniff');
+      c.header('Cache-Control', 'public, max-age=31536000, immutable');
+      return c.body(new Uint8Array(png));
+    });
   if (platform) app.route('/api', computerRoutes(platform.computers));
   if (platform)
     app.route(

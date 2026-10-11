@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { Dot, Memory, State, WorkspaceState } from '../shared/types';
 import { ConnectionsSection } from './ConnectionsSection';
+import { AvatarPicker } from './AvatarPicker';
 import {
   setThemePreference,
   themePreference,
@@ -58,6 +59,9 @@ export function WorkspaceDialog({
   );
   const [skillDelivery, setSkillDelivery] = useState(
     dialog.type === 'dot' ? (dialog.dot?.skillDeliveryEnabled ?? false) : false,
+  );
+  const [avatar, setAvatar] = useState<string | null>(
+    dialog.type === 'dot' ? (dialog.dot?.avatar ?? null) : null,
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -123,7 +127,7 @@ export function WorkspaceDialog({
         >
           <X size={18} />
         </button>
-        <span className="eyebrow">OPENDOTS TEMPLATE</span>
+        <span className="eyebrow">THINNSPACE</span>
         <h2 id="dialog-title">{title}</h2>
         <form
           onSubmit={async (e) => {
@@ -149,6 +153,7 @@ export function WorkspaceDialog({
                 memoryAllowed: memory,
                 learningContainerId: learningContainer.trim() || null,
                 skillDeliveryEnabled: skillDelivery,
+                avatar,
               };
             }
             if (dialog.type === 'settings') {
@@ -216,6 +221,13 @@ export function WorkspaceDialog({
                 }
               />
             </>
+          )}
+          {dialog.type === 'dot' && (
+            <AvatarPicker
+              value={avatar}
+              onChange={setAvatar}
+              uploaded={workspace.avatars}
+            />
           )}
           {dialog.type === 'dot' && (
             <fieldset className="space-access-fields">

@@ -105,7 +105,7 @@ export function ResultPane({
                 const url = URL.createObjectURL(blob);
                 const anchor = document.createElement('a');
                 anchor.href = url;
-                anchor.download = 'opendots-brief.txt';
+                anchor.download = 'thinnspace-brief.txt';
                 anchor.click();
                 URL.revokeObjectURL(url);
               }}
@@ -177,6 +177,7 @@ export function ResultPane({
         <div className="pane-empty">
           <Mascot
             identity={defaultDotId}
+            avatar={dots.find((dot) => dot.id === defaultDotId)?.avatar}
             name={dots.find((dot) => dot.id === defaultDotId)?.name}
             state={dotState}
           />

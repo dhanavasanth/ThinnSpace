@@ -1,3 +1,4 @@
+import type { FlowSummary } from './flows.js';
 export type Status =
   | 'queued'
   | 'running'
@@ -87,6 +88,8 @@ export interface Dot {
   createdAt: number;
   learningContainerId?: string | null;
   skillDeliveryEnabled?: boolean;
+  /** Character id from shared/avatars; null picks a stable default. */
+  avatar?: string | null;
 }
 export interface Conversation {
   id: string;
@@ -115,9 +118,17 @@ export interface SetupStatus {
   slack: string;
   missing: string[];
 }
+export interface AvatarRecord {
+  id: string;
+  label: string;
+  createdAt: number;
+}
 export interface WorkspaceState {
   spaces: Space[];
   dots: Dot[];
+  /** Owner-uploaded avatars; bundled ones live in shared/avatars. */
+  avatars: AvatarRecord[];
+  flows: FlowSummary[];
   conversations: Conversation[];
   setup: SetupStatus;
   calls: CallReceipt[];

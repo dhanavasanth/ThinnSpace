@@ -1,0 +1,1099 @@
+/* Flows canvas editor. Everything is scoped under .flow-editor. */
+.flow-editor {
+  --flow-accent: #ff6a1f;
+  --flow-accent-soft: #fff1e8;
+  --flow-line: #e9e8e6;
+  --flow-muted: #8c8d97;
+  /* Darker muted for text at 12px and below (AA on white). */
+  --flow-muted-text: #6f717c;
+  --flow-ink: #333641;
+  --flow-canvas: #fafaf9;
+  --flow-radius: 10px;
+  --flow-shadow: 0 1px 2px #1f232908, 0 6px 18px #1f232910;
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - 64px);
+  min-height: 420px;
+  background: #fff;
+  color: var(--flow-ink);
+  font-size: 13px;
+  position: relative;
+}
+.template-app .workspace > .flow-editor:first-child {
+  height: 100dvh;
+}
+.flow-editor * {
+  box-sizing: border-box;
+}
+.flow-editor button {
+  font-size: 12px;
+  border-radius: 8px;
+  padding: 6px 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.2;
+}
+.flow-editor .primary {
+  background: var(--flow-accent);
+  border-color: var(--flow-accent);
+  color: #fff;
+}
+.flow-editor .primary:hover:not(:disabled) {
+  background: #e4560f;
+}
+.flow-editor .icon-button {
+  padding: 6px;
+  border-radius: 8px;
+  color: #6b6f7c;
+}
+.flow-editor .icon-button:hover:not(:disabled) {
+  background: #f3f2f0;
+  color: var(--flow-ink);
+}
+.flow-editor .muted {
+  color: var(--flow-muted);
+}
+.flow-editor .error {
+  color: #c2410c;
+}
+.flow-editor input,
+.flow-editor textarea {
+  font-size: 13px;
+  color: var(--flow-ink);
+}
+
+/* ---------- header ---------- */
+.flow-header {
+  height: 56px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px 0 10px;
+  border-bottom: 1px solid var(--flow-line);
+  background: #fff;
+}
+.flow-header-spacer {
+  flex: 1;
+}
+.flow-header-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--flow-line);
+  margin: 0 2px;
+}
+.flow-editor .icon-button.danger:hover:not(:disabled) {
+  background: #fdeceb;
+  color: #b42318;
+}
+.flow-header-group {
+  display: inline-flex;
+  gap: 2px;
+}
+.flow-name {
+  border: 1px solid transparent;
+  background: none;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 4px 8px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+.flow-name:hover {
+  border-color: var(--flow-line);
+}
+.flow-name-input {
+  font-size: 14px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border: 1px solid var(--flow-accent);
+  border-radius: 8px;
+  width: 280px;
+  outline: none;
+}
+.flow-save-chip {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #f3f2f0;
+  color: var(--flow-muted);
+  white-space: nowrap;
+}
+.flow-save-chip.warn {
+  background: #fff7e6;
+  color: #9a5a00;
+}
+.flow-save-chip.error {
+  background: #fdeceb;
+  color: #b42318;
+}
+.flow-save-retry {
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  border: 1px solid #f3b8b2;
+  background: #fff;
+  color: #b42318;
+  line-height: 1.5;
+}
+.flow-save-retry:hover {
+  background: #fdeceb;
+}
+.flow-problems-pill {
+  font-size: 11px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--flow-line);
+  background: #fff;
+  gap: 5px;
+}
+.flow-problems-pill.ok {
+  color: #15803d;
+}
+.flow-problems-pill.warning {
+  color: #9a5a00;
+  border-color: #f5d79a;
+  background: #fff7e6;
+}
+.flow-problems-pill.error {
+  color: #b42318;
+  border-color: #f5b8b2;
+  background: #fdeceb;
+}
+.flow-problems-pill[aria-pressed='true'] {
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+.flow-disabled-wrap {
+  display: inline-flex;
+}
+/* Lifecycle chip: grey draft, green published, amber unpublished changes. */
+.flow-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 9px 3px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--flow-line);
+  background: #fff;
+  color: #5b5d68;
+  white-space: nowrap;
+}
+.flow-status-chip i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #b1b2bb;
+}
+.flow-status-chip.published {
+  color: #15803d;
+  border-color: #bfe6c9;
+  background: #f0faf3;
+}
+.flow-status-chip.published i {
+  background: #22a35a;
+}
+.flow-status-chip.changed {
+  color: #9a5a00;
+  border-color: #f5d79a;
+  background: #fff7e6;
+}
+.flow-status-chip.changed i {
+  background: #e9a23b;
+}
+.flow-preview-button {
+  gap: 6px;
+}
+.flow-preview-button.active {
+  border-color: var(--flow-accent);
+  color: var(--flow-accent);
+  background: #fff1e8;
+}
+/* Publish popover, anchored under the Publish button. */
+.flow-publish-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  width: 300px;
+  z-index: 40;
+  background: #fff;
+  border: 1px solid var(--flow-line);
+  border-radius: var(--flow-radius);
+  box-shadow: 0 12px 32px #1f232922;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+}
+.flow-publish-popover strong {
+  font-size: 13px;
+}
+.flow-publish-popover p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.flow-publish-popover .field-label {
+  margin-top: 4px;
+}
+.flow-publish-popover input {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--flow-line);
+  border-radius: 8px;
+  outline: none;
+}
+.flow-publish-popover input:focus {
+  border-color: var(--flow-accent);
+}
+.flow-publish-error {
+  font-size: 12px;
+}
+.flow-publish-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+}
+.flow-menu-wrap {
+  position: relative;
+}
+.flow-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  min-width: 180px;
+  background: #fff;
+  border: 1px solid var(--flow-line);
+  border-radius: var(--flow-radius);
+  box-shadow: var(--flow-shadow);
+  padding: 4px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+}
+.flow-menu button {
+  border: 0;
+  background: none;
+  justify-content: flex-start;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+.flow-menu button:hover {
+  background: #f3f2f0;
+}
+.flow-menu button.danger {
+  color: #b42318;
+}
+.flow-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: #fff7e6;
+  color: #7a4600;
+  border-bottom: 1px solid #f5d79a;
+  font-size: 12px;
+}
+.flow-banner button {
+  background: #fff;
+}
+/* Run-order preview: a slim banner above the canvas. */
+.flow-preview-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 6px 14px;
+  background: #fff1e8;
+  color: #7a3a10;
+  border-bottom: 1px solid #ffd3bb;
+  font-size: 12px;
+}
+.flow-preview-banner strong {
+  font-weight: 600;
+}
+.flow-preview-banner span {
+  color: #a05a2c;
+}
+.flow-preview-banner button {
+  margin-left: auto;
+  gap: 5px;
+  padding: 3px 10px;
+  font-size: 12px;
+  background: #fff;
+  border-color: #ffc5a6;
+}
+
+/* ---------- body layout ---------- */
+.flow-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.flow-center {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.flow-canvas {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--flow-canvas);
+}
+/* The right slot holds either the step picker or FlowProperties; both draw
+   their own border and chrome. Its width is set inline (320-480px,
+   remembered) and the grip resizes it. */
+.flow-properties-slot {
+  width: 360px;
+  flex-shrink: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+.flow-panel-grip {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 3;
+}
+.flow-panel-grip::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.flow-panel-grip:hover::after,
+.flow-panel-grip:focus-visible::after {
+  background: var(--flow-accent);
+}
+.flow-panel-grip:focus-visible {
+  outline: none;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---------- step picker (right slot) ---------- */
+.flow-node-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: #fff;
+  border-left: 1px solid var(--flow-line);
+}
+.flow-node-panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 16px 10px 10px 18px;
+}
+.flow-node-panel-titles {
+  flex: 1;
+  min-width: 0;
+}
+.flow-node-panel-titles h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 1.25;
+  letter-spacing: -0.1px;
+}
+.flow-node-panel-titles p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.flow-node-panel-titles p strong {
+  color: var(--flow-ink);
+  font-weight: 600;
+}
+.flow-node-panel-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 14px 6px;
+  padding: 0 10px;
+  height: 36px;
+  border: 1px solid var(--flow-line);
+  border-radius: 9px;
+  background: #faf9f7;
+  color: var(--flow-muted);
+  transition: border-color 0.12s ease;
+}
+.flow-node-panel-search:focus-within {
+  border-color: var(--flow-accent);
+  background: #fff;
+}
+.flow-node-panel-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: none;
+  padding: 0;
+  height: 100%;
+}
+.flow-node-panel-search input::-webkit-search-cancel-button {
+  display: none;
+}
+.flow-node-panel-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 10px 18px;
+}
+.flow-node-panel-crumb {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px 8px;
+}
+.flow-node-panel-crumb button {
+  border: 0;
+  background: none;
+  padding: 4px 6px 4px 2px;
+  gap: 4px;
+  color: var(--flow-muted-text);
+  font-weight: 500;
+}
+.flow-node-panel-crumb button:hover {
+  color: var(--flow-accent);
+}
+.flow-node-panel-crumb strong {
+  font-size: 12.5px;
+}
+.flow-node-panel-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 9px 10px 9px 8px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: none;
+  cursor: pointer;
+  transition:
+    background 0.1s ease,
+    border-color 0.1s ease;
+}
+.flow-node-panel-row + .flow-node-panel-row {
+  margin-top: 1px;
+}
+.flow-node-panel-row:hover,
+.flow-node-panel-row.active {
+  background: #f7f6f4;
+  border-color: var(--flow-line);
+}
+.flow-node-panel-row.active {
+  box-shadow: inset 0 0 0 1px #ff6a1f33;
+  border-color: #ffc5a6;
+}
+.flow-node-panel-row[aria-disabled='true'] {
+  cursor: not-allowed;
+}
+.flow-node-panel-row[aria-disabled='true'] .flow-node-panel-icon,
+.flow-node-panel-row[aria-disabled='true'] .flow-node-panel-text > span {
+  opacity: 0.5;
+}
+.flow-node-panel-row.category.soon {
+  opacity: 0.6;
+}
+.flow-node-panel-icon {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.flow-node-panel-icon.avatar {
+  background: var(--flow-accent-soft);
+  overflow: hidden;
+}
+.flow-node-panel-icon.avatar .mascot.small {
+  width: 36px;
+  height: 36px;
+}
+.flow-node-panel-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.flow-node-panel-text strong {
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.flow-node-panel-text strong small {
+  font-size: 11px;
+  font-weight: 400;
+}
+.flow-node-panel-text > span {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--flow-muted-text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.flow-node-panel-row.category .flow-node-panel-text > span {
+  -webkit-line-clamp: 1;
+}
+.flow-node-panel-chevron {
+  flex-shrink: 0;
+  color: #b1b2bb;
+  transition: transform 0.12s ease;
+}
+.flow-node-panel-row:hover .flow-node-panel-chevron,
+.flow-node-panel-row.active .flow-node-panel-chevron {
+  color: var(--flow-accent);
+  transform: translateX(2px);
+}
+.flow-node-panel-tag {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: #f3f2f0;
+}
+.flow-node-panel-empty,
+.flow-list-empty {
+  padding: 12px 8px;
+  font-size: 12px;
+}
+.flow-soon {
+  font-style: normal;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: #f3f2f0;
+  color: var(--flow-muted);
+}
+
+/* ---------- floating canvas controls ---------- */
+.flow-popover-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+}
+/* The orange '+' at the top-right of the canvas opens the step picker. */
+.flow-editor .react-flow__panel.top.right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px;
+}
+.flow-add-fab {
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border-radius: 50%;
+  border: 0;
+  justify-content: center;
+  background: var(--flow-accent);
+  color: #fff;
+  box-shadow:
+    0 2px 6px #ff6a1f40,
+    0 8px 22px #1f232926;
+  transition:
+    background 0.12s ease,
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.flow-add-fab:hover {
+  background: #e4560f;
+  transform: translateY(-1px);
+  box-shadow:
+    0 3px 8px #ff6a1f4d,
+    0 12px 26px #1f23292e;
+}
+.flow-add-fab:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px #fff,
+    0 0 0 4px var(--flow-accent);
+}
+.flow-add-fab.open svg {
+  transform: rotate(45deg);
+}
+.flow-add-fab svg {
+  transition: transform 0.15s ease;
+}
+/* The centred Run bar at the bottom of the canvas. */
+.flow-editor .react-flow__panel.bottom.center {
+  margin: 18px;
+}
+.flow-run-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.flow-run-button {
+  height: 38px;
+  padding: 0 18px 0 14px;
+  border-radius: 999px;
+  border: 0;
+  font-size: 13px;
+  font-weight: 600;
+  gap: 8px;
+  background: var(--flow-accent);
+  color: #fff;
+  box-shadow:
+    0 2px 6px #ff6a1f40,
+    0 8px 22px #1f232926;
+  transition:
+    background 0.12s ease,
+    transform 0.15s ease;
+}
+.flow-run-button:hover:not(:disabled) {
+  background: #e4560f;
+  transform: translateY(-1px);
+}
+.flow-run-button:disabled {
+  background: #e9e8e6;
+  color: #9a9ca6;
+  box-shadow: var(--flow-shadow);
+  cursor: not-allowed;
+}
+/* Stays clickable while the linter has errors: the click opens Problems. */
+.flow-run-button.has-problems {
+  background: #fff;
+  color: var(--flow-accent);
+  box-shadow:
+    inset 0 0 0 1.5px var(--flow-accent),
+    var(--flow-shadow);
+}
+.flow-run-button.has-problems:hover:not(:disabled) {
+  background: #fff4ec;
+}
+.flow-run-secondary {
+  height: 38px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid var(--flow-line);
+  background: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: var(--flow-shadow);
+}
+.flow-run-secondary:hover {
+  border-color: var(--flow-accent);
+  color: var(--flow-accent);
+}
+
+/* ---------- confirm dialog ---------- */
+.flow-confirm {
+  width: min(380px, calc(100vw - 32px));
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 20px 60px #1f232933;
+  padding: 18px 18px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.flow-confirm strong {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.flow-confirm p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.flow-confirm-error {
+  font-size: 12px;
+}
+.flow-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+}
+.flow-confirm-actions .danger {
+  background: #d92d20;
+  border-color: #d92d20;
+  color: #fff;
+}
+.flow-confirm-actions .danger:hover:not(:disabled) {
+  background: #b42318;
+}
+
+/* ---------- React Flow overrides ---------- */
+.flow-editor .react-flow {
+  background: var(--flow-canvas);
+  /* Dot grid colour lives here (not as a prop) so the dark theme flips it. */
+  --xy-background-pattern-color: #d6d4d0;
+}
+.flow-editor .react-flow__node {
+  cursor: grab;
+}
+.flow-editor .react-flow__node:focus-visible {
+  outline: none;
+}
+.flow-editor .react-flow__handle.connectionindicator.valid {
+  box-shadow: 0 0 0 3px #22c55e55;
+}
+.flow-editor .react-flow__handle.connectionindicator.invalid {
+  box-shadow: 0 0 0 3px #ef444455;
+}
+.flow-editor .react-flow__controls {
+  background: #fff;
+  border: 1px solid var(--flow-line);
+  border-radius: 9px;
+  box-shadow: var(--flow-shadow);
+  overflow: hidden;
+  margin: 16px;
+}
+.flow-editor .react-flow__controls-button {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-bottom: 1px solid var(--flow-line);
+  background: #fff;
+  color: #4b4f5c;
+  border-radius: 0;
+  padding: 0;
+  justify-content: center;
+}
+.flow-editor .react-flow__controls-button:last-child {
+  border-bottom: 0;
+}
+.flow-editor .react-flow__controls-button:hover {
+  background: #f7f6f4;
+}
+.flow-editor .react-flow__controls-button svg {
+  max-width: 13px;
+  max-height: 13px;
+  fill: currentColor;
+}
+.flow-editor .react-flow__minimap {
+  background: #fff;
+  border: 1px solid var(--flow-line);
+  border-radius: 9px;
+  box-shadow: var(--flow-shadow);
+  margin: 16px;
+  overflow: hidden;
+}
+.flow-editor .react-flow__minimap-mask {
+  fill: #1f232910;
+}
+.flow-editor .react-flow__minimap-node {
+  opacity: 0.55;
+}
+.flow-editor .react-flow__selection,
+.flow-editor .react-flow__nodesselection-rect {
+  background: #ff6a1f14;
+  border: 1px solid #ff6a1f88;
+}
+.flow-editor .react-flow__edge-path {
+  transition: stroke-width 0.12s ease;
+}
+.flow-editor .react-flow__connection-path {
+  stroke-dasharray: 6 4;
+}
+.flow-editor .react-flow__panel.flow-notice,
+.flow-notice {
+  margin-top: 12px;
+  padding: 7px 12px;
+  background: #1f2329;
+  color: #fff;
+  border-radius: 8px;
+  font-size: 12px;
+  box-shadow: var(--flow-shadow);
+}
+
+/* ---------- problems tray ---------- */
+.flow-problems {
+  flex-shrink: 0;
+  max-height: 220px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--flow-line);
+  background: #fff;
+}
+.flow-problems header,
+.flow-drawer header,
+.flow-sheet header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--flow-line);
+  font-size: 13px;
+}
+.flow-problems header .icon-button,
+.flow-drawer header .icon-button,
+.flow-sheet header .icon-button {
+  margin-left: auto;
+}
+.flow-problems header .muted {
+  font-size: 11px;
+}
+.flow-problems ul {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  overflow: auto;
+}
+.flow-problem {
+  width: 100%;
+  border: 0;
+  background: none;
+  text-align: left;
+  padding: 7px 8px;
+  gap: 8px;
+  border-radius: 6px;
+}
+.flow-problem:hover {
+  background: #f7f6f4;
+}
+.flow-problem.error svg {
+  color: #b42318;
+}
+.flow-problem.warning svg {
+  color: #b7791f;
+}
+.flow-problem span {
+  flex: 1;
+}
+.flow-problem small {
+  font-size: 11px;
+}
+.flow-problems-empty {
+  margin: 0;
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #15803d;
+  font-size: 12px;
+}
+
+/* ---------- versions drawer ---------- */
+.flow-drawer {
+  position: absolute;
+  top: 56px;
+  right: 0;
+  bottom: 0;
+  width: 320px;
+  background: #fff;
+  border-left: 1px solid var(--flow-line);
+  box-shadow: -8px 0 28px #1f232914;
+  display: flex;
+  flex-direction: column;
+  z-index: 25;
+}
+.flow-drawer-name {
+  display: flex;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--flow-line);
+}
+.flow-drawer-name input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--flow-line);
+  border-radius: 8px;
+  padding: 6px 9px;
+  outline: none;
+}
+.flow-drawer-name input:focus {
+  border-color: var(--flow-accent);
+}
+.flow-drawer-error {
+  margin: 8px 12px 0;
+  font-size: 12px;
+}
+.flow-drawer-list {
+  flex: 1;
+  overflow: auto;
+  padding: 6px 8px 16px;
+}
+.flow-version {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 6px;
+  border-bottom: 1px solid #f1f0ee;
+}
+.flow-version-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.flow-version-text strong {
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.flow-version-text small {
+  font-size: 11px;
+}
+.flow-version button {
+  padding: 5px 9px;
+  font-size: 11.5px;
+}
+
+/* ---------- shortcuts sheet ---------- */
+.flow-sheet-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: #1f232933;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.flow-sheet {
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100vh - 64px);
+  overflow: auto;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 20px 60px #1f232933;
+}
+.flow-sheet dl {
+  margin: 0;
+  padding: 8px 14px 14px;
+}
+.flow-sheet dl > div {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 7px 0;
+  border-bottom: 1px solid #f1f0ee;
+}
+.flow-sheet dt {
+  width: 180px;
+  flex-shrink: 0;
+}
+.flow-sheet dd {
+  margin: 0;
+  font-size: 12.5px;
+}
+.flow-sheet kbd {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--flow-line);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: #faf9f7;
+  white-space: nowrap;
+}
+
+/* ---------- loading / error states ---------- */
+.flow-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--flow-muted);
+}
+.flow-state p {
+  margin: 0;
+  color: var(--flow-ink);
+}
+.flow-state div {
+  display: flex;
+  gap: 8px;
+}
+.flow-skeleton-header,
+.flow-skeleton-canvas {
+  background: linear-gradient(90deg, #f3f2f0 25%, #faf9f7 50%, #f3f2f0 75%);
+  background-size: 400% 100%;
+  animation: flow-shimmer 1.4s ease infinite;
+}
+.flow-skeleton-header {
+  height: 56px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--flow-line);
+}
+.flow-skeleton-canvas {
+  flex: 1;
+}
+@keyframes flow-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-editor *,
+  .flow-editor .react-flow__edge-path {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+/* Narrow screens: the right slot (step picker or properties) floats over
+   the canvas so the canvas keeps its width. */
+@media (max-width: 900px) {
+  .flow-properties-slot {
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: min(360px, 90vw) !important;
+    z-index: 20;
+    box-shadow: -8px 0 24px #1f232914;
+  }
+  .flow-panel-grip {
+    display: none;
+  }
+  .flow-body {
+    position: relative;
+  }
+}

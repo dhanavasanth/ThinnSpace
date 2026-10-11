@@ -21,6 +21,7 @@ import {
   Search,
   Settings2,
   Trash2,
+  Workflow,
   X,
 } from 'lucide-react';
 import type {
@@ -40,6 +41,7 @@ import {
   visibleNotice,
   type Notices,
 } from './poll-notice';
+import { BRAND } from '../shared/brand';
 import { Mascot } from './Mascot';
 import { Chat } from './Chat';
 import { ThreadList } from './ThreadList';
@@ -48,6 +50,10 @@ import { TaskRow } from './TaskPresentation';
 import { TaskActions } from './TaskActions';
 import { WorkspaceDialog, type Dialog } from './WorkspaceDialog';
 import { submitComposerOnEnter } from './chat-composer';
+import { FlowEditor } from './flows/FlowEditor';
+import { FlowsHome, flowStatusLabel, flowTrigger } from './flows/FlowsHome';
+import { FLOWS_ROUTE, flowRoute } from './flows/contract';
+import './flows/flow-home.css';
 
 function describeFailure(error: unknown, fallback: string) {
   return {
@@ -62,43 +68,55 @@ export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceState>();
   const [selectedDot, setSelectedDot] = useState('');
   const [selectedThread, setSelectedThread] = useState<string>();
-  const [view, rawSetView] = useState<'chat' | 'tasks' | 'memories' | 'space'>(
-    'chat',
-  );
+  const [view, rawSetView] = useState<
+    'chat' | 'tasks' | 'memories' | 'space' | 'flows' | 'flow'
+  >('chat');
   const dirtyPage = useRef(false);
   const [spaceId, setSpaceId] = useState('');
   const [pageId, setPageId] = useState<string>();
+  const [flowId, setFlowId] = useState<string>();
+  // Bumped by the sidebar's FLOWS '+' so the list opens its new-flow form.
+  const [createFlowRequested, setCreateFlowRequested] = useState(0);
   const setDirtyPage = useCallback((value: boolean) => {
     dirtyPage.current = value;
   }, []);
   const setView = (next: typeof view) => {
-    if (dirtyPage.current && !window.confirm('Leave your unsaved page draft?'))
+    if (
+      dirtyPage.current &&
+      !window.confirm('You have unsaved changes. Leave anyway?')
+    )
       return;
     dirtyPage.current = false;
-    if (next !== 'space')
+    if (next !== 'space' && next !== 'flows' && next !== 'flow')
       history.replaceState(null, '', location.pathname + location.search);
     rawSetView(next);
   };
   useEffect(() => {
     let acceptedHash = location.hash;
     const navigate = () => {
-      const match = location.hash.match(
+      const space = location.hash.match(
         /^#\/spaces\/([^/]+)(?:\/pages\/([^/]+))?$/,
       );
-      if (!match) return;
+      const flow = location.hash.match(/^#\/flows(?:\/([^/]+))?$/);
+      if (!space && !flow) return;
       if (dirtyPage.current && location.hash === acceptedHash) return;
       if (
         dirtyPage.current &&
-        !window.confirm('Leave your unsaved page draft?')
+        !window.confirm('You have unsaved changes. Leave anyway?')
       ) {
         history.replaceState(null, '', acceptedHash || location.pathname);
         return;
       }
       acceptedHash = location.hash;
       dirtyPage.current = false;
-      setSpaceId(match[1]);
-      setPageId(match[2]);
-      rawSetView('space');
+      if (space) {
+        setSpaceId(space[1]);
+        setPageId(space[2]);
+        rawSetView('space');
+      } else if (flow) {
+        setFlowId(flow[1]);
+        rawSetView(flow[1] ? 'flow' : 'flows');
+      }
       setMobile(false);
     };
     navigate();
@@ -107,6 +125,12 @@ export function App() {
   }, []);
   const openPage = (space: string, page?: string) => {
     openPageLink(`#/spaces/${space}${page ? `/pages/${page}` : ''}`);
+  };
+  const openFlows = () => openPageLink(FLOWS_ROUTE);
+  const openFlow = (id: string) => openPageLink(flowRoute(id));
+  const createFlow = () => {
+    openFlows();
+    setCreateFlowRequested((count) => count + 1);
   };
 
   const [notices, setNotices] = useState<Notices>({
@@ -280,7 +304,7 @@ export function App() {
             onChange={(e) => setAuth(e.target.value)}
             required
           />
-          <button className="primary">Unlock OpenDots</button>
+          <button className="primary">Unlock {BRAND.name}</button>
         </form>
         {error && (
           <p className="chat-error" role="alert">
@@ -303,18 +327,19 @@ export function App() {
         )}
       </main>
     );
+  const openFlowId = view === 'flow' ? flowId : undefined;
   const content = (
     <div className={`app template-app ${navCollapsed ? 'nav-collapsed' : ''}`}>
       <nav className="icon-rail" aria-label="Workspace navigation">
         <button
           className="rail-brand"
-          aria-label="OpenDots home"
+          aria-label={`${BRAND.name} home`}
           onClick={() => {
             setView('chat');
             setSelectedThread(undefined);
           }}
         >
-          o<span>·</span>
+          T<span>·</span>
         </button>
         <button
           aria-label={navCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
@@ -336,6 +361,9 @@ export function App() {
           }}
         >
           <Folder size={18} />
+        </button>
+        <button aria-label="Flows" onClick={openFlows}>
+          <Workflow size={18} />
         </button>
         <button aria-label="Open activity" onClick={() => setView('tasks')}>
           <Clock3 size={18} />
@@ -381,7 +409,9 @@ export function App() {
             <i />
             <i />
           </span>
-          OpenDots<span className="wordmark-dot">•</span>
+          {BRAND.name}
+          <span className="wordmark-dot">•</span>
+          <small className="wordmark-by">by {BRAND.company}</small>
         </button>
         <button
           className="new-chat nav-item"
@@ -413,7 +443,13 @@ export function App() {
                 }
                 onClick={() => chooseDot(item)}
               >
-                <Mascot identity={item.id} name={item.name} small decorative />
+                <Mascot
+                  identity={item.id}
+                  avatar={item.avatar}
+                  name={item.name}
+                  small
+                  decorative
+                />
                 <span>{item.name}</span>
               </button>
               <button
@@ -448,6 +484,56 @@ export function App() {
               onOpen={(id) => openPage(space.id, id)}
             />
           ))}
+        </nav>
+        <div className="spaces-heading nav-label">
+          FLOWS
+          <button
+            className="icon-button"
+            aria-label="Create flow"
+            onClick={createFlow}
+          >
+            <Plus size={14} />
+          </button>
+        </div>
+        <nav className="flows-nav" aria-label="Flows">
+          <button
+            className={`nav-item ${view === 'flows' ? 'active' : ''}`}
+            aria-current={view === 'flows' ? 'page' : undefined}
+            onClick={openFlows}
+          >
+            <Workflow size={16} />
+            <span>All flows</span>
+            {workspace.flows.length > 0 && (
+              <small>{workspace.flows.length}</small>
+            )}
+          </button>
+          {workspace.flows.map((flow) => {
+            const trigger = flowTrigger(flow.trigger);
+            const Trigger = trigger.icon;
+            const active = view === 'flow' && flowId === flow.id;
+            return (
+              <button
+                key={flow.id}
+                className={`nav-item flow-nav-item ${active ? 'active' : ''}`}
+                aria-current={active ? 'page' : undefined}
+                onClick={() => openFlow(flow.id)}
+              >
+                <Workflow size={16} />
+                <span>{flow.name}</span>
+                <Trigger
+                  size={12}
+                  className="flow-nav-trigger"
+                  aria-label={trigger.label}
+                />
+                <i
+                  className={`flow-nav-status ${flow.status}`}
+                  role="img"
+                  aria-label={flowStatusLabel(flow.status)}
+                  title={flowStatusLabel(flow.status)}
+                />
+              </button>
+            );
+          })}
         </nav>
         {configured ? (
           <ThreadList
@@ -531,7 +617,9 @@ export function App() {
             <span>
               {view === 'space'
                 ? workspace.spaces.find((space) => space.id === spaceId)?.name
-                : 'Dots'}
+                : view === 'flows' || view === 'flow'
+                  ? 'Flows'
+                  : 'Dots'}
             </span>
             <span>/</span>
             <strong>
@@ -541,7 +629,12 @@ export function App() {
                   ? 'Activity'
                   : view === 'space'
                     ? 'Pages'
-                    : 'Memories'}
+                    : view === 'flows'
+                      ? 'All flows'
+                      : view === 'flow'
+                        ? (workspace.flows.find((flow) => flow.id === flowId)
+                            ?.name ?? 'Flow')
+                        : 'Memories'}
             </strong>
           </div>
           <div className="top-actions">
@@ -614,6 +707,31 @@ export function App() {
               }
             }}
           />
+        ) : openFlowId ? (
+          <FlowEditor
+            key={openFlowId}
+            flowId={openFlowId}
+            workspace={workspace}
+            onBack={openFlows}
+            onRefresh={refresh}
+            onDirty={setDirtyPage}
+            onEditDot={(dotId: string) => {
+              const target = workspace.dots.find((item) => item.id === dotId);
+              setDialog({
+                type: 'dot',
+                dot: target,
+                spaceId: target?.spaceId ?? workspace.spaces[0]?.id ?? '',
+              });
+            }}
+          />
+        ) : view === 'flows' || view === 'flow' ? (
+          <FlowsHome
+            flows={workspace.flows}
+            workspace={workspace}
+            onOpen={openFlow}
+            onRefresh={refresh}
+            createRequested={createFlowRequested}
+          />
         ) : view === 'chat' ? (
           <div className={`chat-workspace ${pane ? 'split' : ''}`}>
             <div className="chat-column">
@@ -640,6 +758,7 @@ export function App() {
                   <div className="empty-chat-persona">
                     <Mascot
                       identity={dot.id}
+                      avatar={dot.avatar}
                       name={dot.name}
                       state={state.settings.paused ? 'paused' : 'idle'}
                     />

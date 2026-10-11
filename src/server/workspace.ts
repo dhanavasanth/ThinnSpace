@@ -1,5 +1,8 @@
 import { ComputerStore } from './computer-store.js';
 import { ConnectionStore } from './connection-store.js';
+import { AvatarStore } from './avatar-store.js';
+import { FlowStore } from './flow-store.js';
+import { FlowRunStore } from './flow-run-store.js';
 import { Pages } from './pages.js';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
@@ -12,6 +15,9 @@ export class WorkspaceStore {
   readonly pages: Pages;
   readonly computers: ComputerStore;
   readonly connections: ConnectionStore;
+  readonly avatars: AvatarStore;
+  readonly flows: FlowStore;
+  readonly runs: FlowRunStore;
   constructor(
     path: string,
     readonly ownerId: string,
@@ -28,6 +34,7 @@ export class WorkspaceStore {
     for (const [table, column, definition] of [
       ['dots', 'learningContainerId', 'TEXT'],
       ['dots', 'skillDeliveryEnabled', 'INTEGER NOT NULL DEFAULT 0'],
+      ['dots', 'avatar', 'TEXT'],
       ['thread_bindings', 'learningContainerId', 'TEXT'],
     ]) {
       if (
@@ -53,6 +60,9 @@ export class WorkspaceStore {
     }
     this.computers = new ComputerStore(this.db);
     this.connections = new ConnectionStore(this.db);
+    this.avatars = new AvatarStore(this.db);
+    this.flows = new FlowStore(this.db);
+    this.runs = new FlowRunStore(this.db);
     this.pages = new Pages(this.db, (id) =>
       this.spaces().some((space) => space.id === id),
     );
@@ -126,6 +136,7 @@ export class WorkspaceStore {
     spaceIds: string[] = [spaceId],
     learningContainerId: string | null = null,
     skillDeliveryEnabled = false,
+    avatar: string | null = null,
   ): Dot {
     this.validateSpaceAccess(spaceId, spaceIds);
     validateLearningSettings(learningContainerId, skillDeliveryEnabled);
@@ -139,13 +150,14 @@ export class WorkspaceStore {
       memoryAllowed,
       learningContainerId,
       skillDeliveryEnabled,
+      avatar,
       createdAt: Date.now(),
     };
     this.db.exec('BEGIN');
     try {
       this.db
         .prepare(
-          'INSERT INTO dots (id, spaceId, name, instructions, researchAllowed, memoryAllowed, createdAt, learningContainerId, skillDeliveryEnabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO dots (id, spaceId, name, instructions, researchAllowed, memoryAllowed, createdAt, learningContainerId, skillDeliveryEnabled, avatar) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         )
         .run(
           dot.id,
@@ -157,6 +169,7 @@ export class WorkspaceStore {
           dot.createdAt,
           learningContainerId,
           +skillDeliveryEnabled,
+          avatar,
         );
       for (const id of dot.spaceIds)
         this.db.prepare('INSERT INTO dot_spaces VALUES (?, ?)').run(dot.id, id);
@@ -189,6 +202,7 @@ export class WorkspaceStore {
       spaceIds?: string[];
       learningContainerId?: string | null;
       skillDeliveryEnabled?: boolean;
+      avatar?: string | null;
     },
   ): Dot {
     const current = this.dot(id);
@@ -203,11 +217,13 @@ export class WorkspaceStore {
     const skillDeliveryEnabled =
       patch.skillDeliveryEnabled ?? current.skillDeliveryEnabled ?? false;
     validateLearningSettings(learningContainerId, skillDeliveryEnabled);
+    const avatar =
+      patch.avatar === undefined ? (current.avatar ?? null) : patch.avatar;
     this.db.exec('BEGIN');
     try {
       this.db
         .prepare(
-          'UPDATE dots SET name=?, instructions=?, researchAllowed=?, memoryAllowed=?, learningContainerId=?, skillDeliveryEnabled=? WHERE id=?',
+          'UPDATE dots SET name=?, instructions=?, researchAllowed=?, memoryAllowed=?, learningContainerId=?, skillDeliveryEnabled=?, avatar=? WHERE id=?',
         )
         .run(
           patch.name,
@@ -216,6 +232,7 @@ export class WorkspaceStore {
           +patch.memoryAllowed,
           learningContainerId,
           +skillDeliveryEnabled,
+          avatar,
           id,
         );
       this.db
