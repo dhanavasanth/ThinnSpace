@@ -16,16 +16,7 @@ import {
   useAgent,
   useCopilotKit,
 } from '@copilotkit/react-core/v2';
-import {
-  FilePlus,
-  ArrowUp,
-  Clock3,
-  Link2,
-  Phone,
-  PhoneOff,
-  Square,
-  X,
-} from 'lucide-react';
+import { FilePlus, Clock3, Phone, PhoneOff } from 'lucide-react';
 import {
   ComputerToolCard,
   type ComputerToolRenderProps,
@@ -35,7 +26,8 @@ import type { CallReceipt, Conversation, Dot } from '../shared/types';
 import { Mascot } from './Mascot';
 import { useVoice } from './useVoice';
 import { CallView } from './CallView';
-import { shouldSubmitComposerOnKeyDown } from './chat-composer';
+import { PromptInput } from './composer/PromptInput';
+import type { ModelSpec } from '../shared/models';
 
 export function Chat({
   thread,
@@ -95,11 +87,17 @@ export function Chat({
   }, [thread.id, contextAttempt]);
   const [draft, setDraft] = useState('');
   const [source, setSource] = useState('');
-  const [sourceOpen, setSourceOpen] = useState(false);
+  const [researchOn, setResearchOn] = useState(false);
+  const [models, setModels] = useState<ModelSpec[]>([]);
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [running, setRunning] = useState(false);
   const voice = useVoice(thread.id, onSaved, agent.messages.at(-1)?.id);
+  useEffect(() => {
+    void api<ModelSpec[]>('/models')
+      .then(setModels)
+      .catch(() => undefined);
+  }, []);
   const sent = useRef(false);
   const bottom = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -143,7 +141,6 @@ export function Chat({
     });
     setDraft('');
     setSource('');
-    setSourceOpen(false);
     try {
       const result = await copilotkit.runAgent({ agent });
       if (!result.newMessages.some((message) => message.role === 'assistant'))
@@ -389,84 +386,52 @@ export function Chat({
         dot={dot}
         voice={voice}
       />
-      <form
-        className="chat-composer"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void send(`${source ? `From ${source}:\n\n` : ''}${draft}`);
+      <PromptInput
+        value={draft}
+        onChange={setDraft}
+        onSubmit={(text) =>
+          void send(`${source ? `From ${source}:\n\n` : ''}${text}`)
+        }
+        dotName={dot.name}
+        status={running ? 'sending' : 'idle'}
+        disabled={!loaded || !contextReady || paused}
+        models={models}
+        modelId={models[0]?.id}
+        priorText={agent.messages
+          .map((message) =>
+            typeof message.content === 'string' ? message.content : '',
+          )
+          .join('\n')}
+        research={{
+          label: 'Web research',
+          id: 'research',
+          unavailable: dot.researchAllowed
+            ? undefined
+            : 'Research is off for this Dot.',
         }}
-      >
-        {sourceOpen && (
-          <div className="source-input">
-            <Link2 size={15} />
-            <input
-              aria-label="Source page URL"
-              type="url"
-              value={source}
-              onChange={(e) => setSource(e.target.value)}
-              placeholder="https://example.com/page"
-            />
-            <button
-              type="button"
-              className="icon-button"
-              aria-label="Remove source"
-              onClick={() => {
-                setSourceOpen(false);
-                setSource('');
-              }}
-            >
-              <X size={14} />
-            </button>
-          </div>
-        )}
-        <div className="chat-compose-row">
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="Add source page link"
-            onClick={() => setSourceOpen(!sourceOpen)}
-          >
-            <Link2 size={19} />
-          </button>
-          <textarea
-            aria-label="Message your Dot"
-            placeholder={`Message ${dot.name}…`}
-            rows={1}
-            value={draft}
-            maxLength={4000}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (shouldSubmitComposerOnKeyDown(e)) {
-                e.preventDefault();
-                e.currentTarget.form?.requestSubmit();
-              }
-            }}
-          />
-          {running ? (
-            <button
-              type="button"
-              className="send-button"
-              aria-label="Stop response"
-              onClick={() => copilotkit.stopAgent({ agent })}
-            >
-              <Square size={16} />
-            </button>
-          ) : (
-            <button
-              className="send-button"
-              aria-label="Send message"
-              disabled={!draft.trim() || !loaded || !contextReady || paused}
-            >
-              <ArrowUp size={19} />
-            </button>
-          )}
-        </div>
-        <div className="chat-compose-note">
-          {voiceReady
-            ? 'Text and voice, one conversation.'
-            : 'Text is ready. Voice needs separate server configuration.'}
-        </div>
-      </form>
+        researchOn={researchOn}
+        onResearchChange={setResearchOn}
+        connectors={{
+          label: 'Connected apps',
+          id: 'connectors',
+          unavailable: 'Manage these in the Dot’s settings.',
+        }}
+        source={source}
+        onSourceChange={setSource}
+        voice={{
+          label: 'Voice',
+          id: 'voice',
+          unavailable: voiceReady
+            ? undefined
+            : 'Voice needs server configuration.',
+        }}
+        voiceActive={voice.status !== 'idle'}
+        onVoiceToggle={() =>
+          voice.status === 'idle' ? void voice.start() : void voice.end()
+        }
+        running={running}
+        onStop={() => copilotkit.stopAgent({ agent })}
+      />
     </div>
   );
 }

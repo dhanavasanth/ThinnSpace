@@ -1,3 +1,4 @@
+import { modelDefaults } from '../shared/models.js';
 import { setupInputSchema } from './setup-telemetry.js';
 import { isBuiltinAvatar } from '../shared/avatars.js';
 import { MAX_AVATAR_BYTES } from './avatar-store.js';
@@ -45,6 +46,32 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
       return c.json({ error: 'Setup step does not match server state.' }, 400);
     platform.setupTelemetry.capture(event);
     return c.json({ ok: true });
+  });
+  /**
+   * Models the owner can choose from. Today that is the one configured
+   * endpoint; once connections land this returns every enabled model
+   * across them. The shape is the same either way so the picker does not
+   * change when that happens.
+   */
+  app.get('/models', (c) => {
+    const configured = platform.config.model;
+    if (!configured) return c.json([]);
+    const caps = modelDefaults(configured);
+    return c.json([
+      {
+        id: configured,
+        model: configured,
+        label: configured,
+        provider: new URL(
+          platform.config.baseUrl ?? 'https://api.openai.com/v1',
+        ).hostname.replace(/^api\./, ''),
+        contextWindow: caps.contextWindow,
+        maxOutput: caps.maxOutput,
+        vision: caps.vision,
+        tools: caps.tools,
+        known: caps.known,
+      },
+    ]);
   });
   app.get('/workspace', (c) =>
     c.json({

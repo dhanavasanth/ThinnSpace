@@ -1,0 +1,401 @@
+/*
+ * Composer styling.
+ *
+ * The reference component leans on framer-motion for presence and spring
+ * motion. Everything here is CSS instead, so it costs no dependency and
+ * stays on the compositor: transforms and opacity only, with easing curves
+ * that approximate the same feel.
+ */
+
+.prompt-input {
+  position: relative;
+  border: 1px solid #e3e3e1;
+  border-radius: 24px;
+  background: #ffffff;
+  padding: 12px 12px 8px;
+  box-shadow:
+    0 1px 2px #0808080a,
+    0 8px 24px -12px #08080824;
+  transition:
+    border-color 220ms cubic-bezier(0.2, 0, 0, 1),
+    box-shadow 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+.prompt-input.focused {
+  border-color: #d2d2cf;
+  box-shadow:
+    0 2px 8px #0808080f,
+    0 16px 48px -12px #08080838;
+}
+.prompt-input.disabled {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+/* Chips for anything folded into the next message. */
+.prompt-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.prompt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 9px;
+  border-radius: 999px;
+  background: #f3f3f1;
+  color: #333641;
+  font-size: 11px;
+  font-weight: 500;
+}
+.prompt-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: #8c8d97;
+  cursor: pointer;
+  transition: color 150ms ease;
+}
+.prompt-chip button:hover {
+  color: #333641;
+}
+
+.prompt-source {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border: 1px solid #ececea;
+  border-radius: 12px;
+  color: #8c8d97;
+}
+.prompt-source input {
+  flex: 1;
+  border: 0;
+  background: none;
+  font-size: 13px;
+  color: #333641;
+  outline: none;
+}
+.prompt-source button {
+  display: inline-flex;
+  padding: 2px;
+  border: 0;
+  background: none;
+  color: #8c8d97;
+  cursor: pointer;
+}
+
+/* The field. The placeholder is a sibling so it can fade independently. */
+.prompt-field {
+  position: relative;
+  padding: 0 4px;
+}
+.prompt-placeholder {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-size: 14px;
+  line-height: 28px;
+  color: #a7a8af;
+  animation: prompt-placeholder-in 360ms cubic-bezier(0.2, 0, 0, 1);
+}
+@keyframes prompt-placeholder-in {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+}
+.prompt-field textarea {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: none;
+  resize: none;
+  font: inherit;
+  font-size: 14px;
+  line-height: 28px;
+  color: #333641;
+  outline: none;
+}
+
+/* Toolbar sits under a hairline, like the reference. */
+.prompt-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #efefed;
+}
+.prompt-actions,
+.prompt-send {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.prompt-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: #8c8d97;
+  cursor: pointer;
+  transition:
+    background-color 180ms ease,
+    color 180ms ease,
+    transform 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+.prompt-icon:hover:not(:disabled) {
+  background: #f3f3f1;
+  color: #333641;
+  transform: translateY(-1px);
+}
+.prompt-icon.open,
+.prompt-icon.active {
+  background: #f3f3f1;
+  color: #333641;
+}
+.prompt-icon:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.prompt-model {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 190px;
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: #8c8d97;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color 180ms ease,
+    color 180ms ease;
+}
+.prompt-model:hover:not(:disabled),
+.prompt-model.open {
+  background: #f3f3f1;
+  color: #333641;
+}
+.prompt-model:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.prompt-model-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Menus open upward, since the composer sits at the bottom. */
+.prompt-menu-anchor {
+  position: relative;
+}
+.prompt-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  min-width: 210px;
+  padding: 5px;
+  border: 1px solid #e6e6e4;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow:
+    0 8px 30px -8px #0808082e,
+    0 2px 8px -2px #08080814;
+  animation: prompt-menu-in 180ms cubic-bezier(0.2, 0, 0, 1);
+}
+.prompt-menu.wide {
+  min-width: 264px;
+}
+@keyframes prompt-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+}
+.prompt-menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: #6b6b6b;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 140ms ease,
+    color 140ms ease;
+}
+.prompt-menu button:hover:not(:disabled) {
+  background: #f5f5f3;
+  color: #333641;
+}
+.prompt-menu button.on {
+  background: #f3f3f1;
+  color: #333641;
+}
+.prompt-menu button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.prompt-menu button span {
+  flex: 1;
+  min-width: 0;
+}
+.prompt-menu button small {
+  flex: none;
+  font-size: 10px;
+  color: #a7a8af;
+}
+.prompt-menu-rule {
+  height: 1px;
+  margin: 5px 4px;
+  background: #efefed;
+}
+.prompt-model-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.prompt-model-row strong {
+  font-weight: 550;
+  color: #333641;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.prompt-model-row small {
+  font-size: 11px;
+  color: #a7a8af;
+}
+
+/*
+ * Context meter. It is an estimate, which the tooltip says plainly, so it
+ * stays quiet until it matters and only then takes colour.
+ */
+.prompt-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: 4px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: #a7a8af;
+  cursor: default;
+}
+.prompt-context-bar {
+  position: relative;
+  width: 34px;
+  height: 3px;
+  border-radius: 999px;
+  background: #ebebe9;
+  overflow: hidden;
+}
+.prompt-context-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--fill, 0%);
+  border-radius: 999px;
+  background: #c3c3c0;
+  transition:
+    width 300ms cubic-bezier(0.2, 0, 0, 1),
+    background-color 300ms ease;
+}
+.prompt-context.high .prompt-context-bar::after {
+  background: #e0a33a;
+}
+.prompt-context.high .prompt-context-text {
+  color: #b8831f;
+}
+.prompt-context.full .prompt-context-bar::after {
+  background: #d4503c;
+}
+.prompt-context.full .prompt-context-text {
+  color: #c4412e;
+}
+
+.prompt-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #ff6a1f;
+  color: #ffffff;
+  cursor: pointer;
+  transition:
+    background-color 180ms ease,
+    transform 180ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    opacity 180ms ease;
+}
+.prompt-action:hover:not(:disabled) {
+  background: #e4560f;
+  transform: scale(1.06);
+}
+.prompt-action:active:not(:disabled) {
+  transform: scale(0.94);
+}
+.prompt-action:disabled {
+  background: #ececea;
+  color: #a7a8af;
+  cursor: default;
+}
+.prompt-action .spin {
+  animation: prompt-spin 900ms linear infinite;
+}
+@keyframes prompt-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.prompt-input :is(button, textarea, input):focus-visible {
+  outline: 2px solid #ff6a1f;
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prompt-input,
+  .prompt-input *,
+  .prompt-menu,
+  .prompt-placeholder {
+    transition: none !important;
+    animation: none !important;
+  }
+}

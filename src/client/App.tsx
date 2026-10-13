@@ -4,7 +4,6 @@ import { SpaceWorkspace } from './SpaceWorkspace';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { CopilotKitProvider } from '@copilotkit/react-core/v2';
 import {
-  ArrowUp,
   ArrowUpRight,
   BookOpen,
   Clock3,
@@ -12,7 +11,6 @@ import {
   Folder,
   Inbox,
   Menu,
-  MessageCircle,
   Monitor,
   MoreHorizontal,
   Pause,
@@ -46,6 +44,8 @@ import {
 import { BRAND } from '../shared/brand';
 import { Mascot } from './Mascot';
 import { Companion } from './companion/Companion';
+import { PromptInput } from './composer/PromptInput';
+import type { ModelSpec } from '../shared/models';
 import { useCompanion } from './companion/useCompanion';
 import { Chat } from './Chat';
 import { ThreadList } from './ThreadList';
@@ -53,7 +53,6 @@ import { ResultPane } from './ResultPane';
 import { TaskRow } from './TaskPresentation';
 import { TaskActions } from './TaskActions';
 import { WorkspaceDialog, type Dialog } from './WorkspaceDialog';
-import { submitComposerOnEnter } from './chat-composer';
 import { FlowEditor } from './flows/FlowEditor';
 import { FlowsHome, flowStatusLabel, flowTrigger } from './flows/FlowsHome';
 import { FLOWS_ROUTE, flowRoute } from './flows/contract';
@@ -183,6 +182,15 @@ export function App() {
   const [capture, setCapture] = useState<Result>();
   const [prompt, setPrompt] = useState('');
   const [pendingPrompt, setPendingPrompt] = useState<string>();
+  const [startResearch, setStartResearch] = useState(false);
+  const [startSource, setStartSource] = useState('');
+  const [models, setModels] = useState<ModelSpec[]>([]);
+  useEffect(() => {
+    if (!signedIn) return;
+    void api<ModelSpec[]>('/models')
+      .then(setModels)
+      .catch(() => undefined);
+  }, [signedIn]);
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [taskDetail, setTaskDetail] = useState<Detail>();
@@ -914,45 +922,41 @@ export function App() {
                       </div>
                     </div>
                   )}
-                  <form
-                    className="composer"
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      void newConversation(prompt);
+                  <PromptInput
+                    value={prompt}
+                    onChange={setPrompt}
+                    onSubmit={(text) => void newConversation(text)}
+                    dotName={dot.name}
+                    status={busy ? 'sending' : 'idle'}
+                    disabled={!configured}
+                    models={models}
+                    modelId={models[0]?.id}
+                    research={{
+                      id: 'research',
+                      label: 'Web research',
+                      unavailable: dot.researchAllowed
+                        ? undefined
+                        : 'Research is off for this Dot.',
                     }}
-                  >
-                    <textarea
-                      aria-label="Start a conversation"
-                      placeholder={
-                        configured
-                          ? `Message ${dot.name}…`
-                          : 'Your first conversation starts after setup.'
-                      }
-                      value={prompt}
-                      maxLength={4000}
-                      onChange={(e) => setPrompt(e.target.value)}
-                      onKeyDown={(e) =>
-                        submitComposerOnEnter(
-                          e,
-                          configured && !busy && !!prompt.trim(),
-                        )
-                      }
-                      disabled={!configured}
-                    />
-                    <div className="composer-bottom">
-                      <span>
-                        <MessageCircle size={14} />
-                        Text and calls, one continuing conversation
-                      </span>
-                      <button
-                        className="send-button"
-                        aria-label="Start conversation"
-                        disabled={!configured || busy || !prompt.trim()}
-                      >
-                        <ArrowUp size={19} />
-                      </button>
-                    </div>
-                  </form>
+                    researchOn={startResearch}
+                    onResearchChange={setStartResearch}
+                    connectors={{
+                      id: 'connectors',
+                      label: 'Connected apps',
+                      unavailable: 'Manage these in the Dot’s settings.',
+                    }}
+                    source={startSource}
+                    onSourceChange={setStartSource}
+                    voice={{
+                      id: 'voice',
+                      label: 'Voice',
+                      unavailable: workspace.setup.voice
+                        ? 'Open a conversation to talk.'
+                        : 'Voice needs server configuration.',
+                    }}
+                    voiceActive={false}
+                    onVoiceToggle={() => undefined}
+                  />
                   <div className="starter-suggestions">
                     {[
                       'Help me think this through',
