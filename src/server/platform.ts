@@ -13,7 +13,7 @@ import {
 import { createSlackChannel } from './slack-channel.js';
 export { slackIdentity } from './slack-channel.js';
 import { Store } from './store.js';
-import { WorkspaceStore } from './workspace.js';
+import { resolveModel, WorkspaceStore } from './workspace.js';
 import { DotAgent } from './dot-agent.js';
 import { runThreadTurn } from './headless.js';
 import {
@@ -136,12 +136,34 @@ export class Platform {
     });
   }
   setup() {
-    return setupStatus(
+    const status = setupStatus(
       this.config,
       this.handler?.channels?.status().overall ??
         (this.config.slackChannel ? 'setup_required' : 'not_configured'),
       this.channelStartupFailed,
     );
+    // The environment variables are one way to have a model, not the only
+    // one any more: a connected endpoint with a model enabled is just as
+    // configured, so saying OPENAI_MODEL is missing would be a lie.
+    if (this.workspace.models.specs().length) {
+      status.model = true;
+      status.missing = status.missing.filter(
+        (item) => item !== 'OPENAI_API_KEY' && item !== 'OPENAI_MODEL',
+      );
+      status.voice = !!(
+        this.config.voiceKey &&
+        this.config.voiceModel &&
+        !status.missing.length
+      );
+    }
+    return status;
+  }
+  /**
+   * Which model would answer in this conversation, and why. The `source`
+   * lets the app explain the choice instead of asserting it.
+   */
+  modelFor(dotId: string, threadId?: string) {
+    return resolveModel(this.workspace, this.config, dotId, threadId);
   }
   requireReady() {
     const missing = this.setup().missing;

@@ -26,8 +26,7 @@ import type { CallReceipt, Conversation, Dot } from '../shared/types';
 import { Mascot } from './Mascot';
 import { useVoice } from './useVoice';
 import { CallView } from './CallView';
-import { PromptInput } from './composer/PromptInput';
-import type { ModelSpec } from '../shared/models';
+import { PromptInput, useModelCatalog } from './composer/PromptInput';
 
 export function Chat({
   thread,
@@ -40,6 +39,8 @@ export function Chat({
   onSaved,
   onSchedule,
   onComputer,
+  onSettings,
+  modelsVersion = 0,
 }: {
   thread: Conversation;
   dot: Dot;
@@ -51,6 +52,14 @@ export function Chat({
   onSaved: () => void;
   onSchedule: () => void;
   onComputer?: () => void;
+  /** Where models are connected, for the picker's empty state. */
+  onSettings?: () => void;
+  /**
+   * Bumped by the app when the Settings panel may have changed what is
+   * connected. This component is keyed by thread, so it would otherwise
+   * only refetch the catalog on a thread switch.
+   */
+  modelsVersion?: number;
 }) {
   const { agent, isReady } = useAgent({
     agentId: `chat-${thread.id}`,
@@ -88,16 +97,39 @@ export function Chat({
   const [draft, setDraft] = useState('');
   const [source, setSource] = useState('');
   const [researchOn, setResearchOn] = useState(false);
-  const [models, setModels] = useState<ModelSpec[]>([]);
+  const { models, issues: modelIssues } = useModelCatalog(true, modelsVersion);
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [running, setRunning] = useState(false);
   const voice = useVoice(thread.id, onSaved, agent.messages.at(-1)?.id);
+  /*
+   * Which model this conversation uses. The choice belongs to the server,
+   * but it is held here as well so the picker changes the moment it is
+   * clicked; a refused write puts the previous one back and says why.
+   */
+  const [modelId, setModelId] = useState<string | null>(thread.model ?? null);
+  const [modelPending, setModelPending] = useState(false);
+  const [modelError, setModelError] = useState('');
   useEffect(() => {
-    void api<ModelSpec[]>('/models')
-      .then(setModels)
-      .catch(() => undefined);
-  }, []);
+    if (thread.model !== undefined) setModelId(thread.model);
+  }, [thread.model]);
+  const chooseModel = async (next: string | null) => {
+    const previous = modelId;
+    setModelId(next);
+    setModelPending(true);
+    setModelError('');
+    try {
+      await api(`/conversations/${thread.id}/model`, 'PUT', { model: next });
+      onSaved();
+    } catch (e) {
+      setModelId(previous);
+      setModelError(
+        e instanceof Error ? e.message : 'That model could not be selected.',
+      );
+    } finally {
+      setModelPending(false);
+    }
+  };
   const sent = useRef(false);
   const bottom = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -396,7 +428,13 @@ export function Chat({
         status={running ? 'sending' : 'idle'}
         disabled={!loaded || !contextReady || paused}
         models={models}
-        modelId={models[0]?.id}
+        modelId={modelId}
+        dotModelId={dot.model ?? null}
+        onModelChange={(id) => void chooseModel(id)}
+        modelPending={modelPending}
+        modelError={modelError}
+        modelIssues={modelIssues}
+        onConnectModel={onSettings}
         priorText={agent.messages
           .map((message) =>
             typeof message.content === 'string' ? message.content : '',

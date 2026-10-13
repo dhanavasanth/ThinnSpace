@@ -2,7 +2,7 @@ import { ComputerStore } from './computer-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { AvatarStore } from './avatar-store.js';
 import { FlowStore } from './flow-store.js';
-import { ModelStore } from './model-store.js';
+import { ModelStore, type TokenField } from './model-store.js';
 import { FlowRunStore } from './flow-run-store.js';
 import { Pages } from './pages.js';
 import { DatabaseSync } from 'node:sqlite';
@@ -10,6 +10,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { validateLearningSettings } from '../shared/learning.js';
+import { modelDefaults } from '../shared/models.js';
 import type { CallReceipt, Conversation, Dot, Space } from '../shared/types.js';
 export class WorkspaceStore {
   private db: DatabaseSync;
@@ -37,7 +38,12 @@ export class WorkspaceStore {
       ['dots', 'learningContainerId', 'TEXT'],
       ['dots', 'skillDeliveryEnabled', 'INTEGER NOT NULL DEFAULT 0'],
       ['dots', 'avatar', 'TEXT'],
+      // A ModelStore spec id: the Dot's default, and a per-conversation
+      // override of it. Nullable so existing rows keep following the
+      // environment configuration until someone picks something.
+      ['dots', 'model', 'TEXT'],
       ['thread_bindings', 'learningContainerId', 'TEXT'],
+      ['thread_bindings', 'model', 'TEXT'],
     ]) {
       if (
         !this.db
@@ -206,6 +212,7 @@ export class WorkspaceStore {
       learningContainerId?: string | null;
       skillDeliveryEnabled?: boolean;
       avatar?: string | null;
+      model?: string | null;
     },
   ): Dot {
     const current = this.dot(id);
@@ -222,11 +229,13 @@ export class WorkspaceStore {
     validateLearningSettings(learningContainerId, skillDeliveryEnabled);
     const avatar =
       patch.avatar === undefined ? (current.avatar ?? null) : patch.avatar;
+    const model =
+      patch.model === undefined ? (current.model ?? null) : patch.model;
     this.db.exec('BEGIN');
     try {
       this.db
         .prepare(
-          'UPDATE dots SET name=?, instructions=?, researchAllowed=?, memoryAllowed=?, learningContainerId=?, skillDeliveryEnabled=?, avatar=? WHERE id=?',
+          'UPDATE dots SET name=?, instructions=?, researchAllowed=?, memoryAllowed=?, learningContainerId=?, skillDeliveryEnabled=?, avatar=?, model=? WHERE id=?',
         )
         .run(
           patch.name,
@@ -236,6 +245,7 @@ export class WorkspaceStore {
           learningContainerId,
           +skillDeliveryEnabled,
           avatar,
+          model,
           id,
         );
       this.db
@@ -288,6 +298,19 @@ export class WorkspaceStore {
     if (!thread || (dotId && thread.dotId !== dotId))
       throw new Error('Conversation does not belong to this Dot and owner.');
     return thread;
+  }
+  /**
+   * Points one conversation at a model, or clears the override with null so
+   * the conversation follows its Dot again. The value is a ModelStore spec
+   * id; whether it still resolves is checked at answer time, not here, so a
+   * connection removed later degrades instead of breaking the thread.
+   */
+  setConversationModel(id: string, model: string | null): Conversation {
+    this.requireThread(id);
+    this.db
+      .prepare('UPDATE thread_bindings SET model=? WHERE id=? AND ownerId=?')
+      .run(model, id, this.ownerId);
+    return this.requireThread(id);
   }
   bindTask(taskId: string, threadId: string) {
     this.requireThread(threadId);
@@ -389,4 +412,123 @@ export class WorkspaceStore {
       .get(threadId);
     return typeof row?.value === 'string' ? JSON.parse(row.value) : null;
   }
+}
+
+/** Which rung of the precedence ladder supplied the model. */
+export type ModelSource =
+  /** This conversation's own override. */
+  | 'conversation'
+  /** The Dot's default. */
+  | 'dot'
+  /** The first enabled model across the owner's connections. */
+  | 'enabled'
+  /** The legacy OPENAI_MODEL / OPENAI_API_KEY environment configuration. */
+  | 'environment';
+
+/** Everything needed to call a model, plus why this one was chosen. */
+export interface ResolvedModel {
+  /** The name the provider expects in the request body. */
+  model: string;
+  baseUrl: string;
+  /** Absent for local servers, which need no credential. */
+  apiKey?: string;
+  /**
+   * Provider attribution headers the connection wants on every request.
+   * The legacy environment rung declares none.
+   */
+  headers?: Record<string, string>;
+  source: ModelSource;
+  /** The spec id that won; the environment rung has none. */
+  specId?: string;
+  /**
+   * The output-cap field this endpoint accepted when it was tested, so a
+   * real turn sends the request shape that was proved rather than a
+   * different one. The legacy environment rung keeps what it always sent.
+   */
+  tokenField: TokenField;
+  /** Largest reply worth asking this model for. */
+  maxOutput: number;
+  /**
+   * Whether this model can call tools at all. A model that cannot must not
+   * be handed tool definitions: it either ignores them or rejects the
+   * request, and either way a flow silently never calls anything.
+   */
+  tools: boolean;
+  /** Whether it can read images. */
+  vision: boolean;
+}
+
+/**
+ * The one place that decides which model answers.
+ *
+ * Precedence, highest first:
+ *   1. the conversation's own override,
+ *   2. the Dot's default,
+ *   3. the first enabled model across the owner's connections,
+ *   4. the legacy OPENAI_MODEL / OPENAI_API_KEY environment configuration.
+ *
+ * A spec id that no longer resolves — its connection was deleted, or the
+ * model was unticked — falls through to the next rung rather than failing,
+ * so deleting a connection degrades a Dot instead of breaking it. Returns
+ * undefined only when no rung can supply a model; callers treat that as
+ * "setup required" rather than calling a nonexistent endpoint.
+ *
+ * `source` is reported so the UI and the logs can say which rung won.
+ */
+export function resolveModel(
+  workspace: WorkspaceStore,
+  config: { model?: string; apiKey?: string; baseUrl?: string },
+  dotId: string,
+  threadId?: string,
+): ResolvedModel | undefined {
+  const fromSpec = (
+    specId: string | null | undefined,
+    source: ModelSource,
+  ): ResolvedModel | undefined => {
+    if (!specId) return undefined;
+    const hit = workspace.models.resolve(specId);
+    return hit ? { ...hit, source, specId } : undefined;
+  };
+  const conversation = threadId
+    ? workspace.conversations().find((thread) => thread.id === threadId)
+    : undefined;
+  const override = fromSpec(conversation?.model, 'conversation');
+  if (override) return override;
+  const preferred = fromSpec(workspace.dot(dotId)?.model, 'dot');
+  if (preferred) return preferred;
+  /*
+   * This rung is what most Dots use, so it prefers a model that can
+   * actually answer: one its endpoint still offers, on a connection whose
+   * last probe did not fail. Taking position 0 regardless would route
+   * every Dot without an explicit default to an older broken connection
+   * that happens to predate the working one. Position 0 stays the last
+   * resort, because an unproved connection is better than none.
+   */
+  const specs = workspace.models.specs();
+  const connections = workspace.models.list();
+  const healthy = specs.find(
+    (spec) =>
+      !spec.missing &&
+      !connections.find((item) => item.id === spec.id.split(':')[0])?.error,
+  );
+  const first = fromSpec(healthy?.id ?? specs[0]?.id, 'enabled');
+  if (first) return first;
+  // The legacy rung needs both halves, which is what setup status has
+  // always required of it.
+  if (config.model && config.apiKey) {
+    const caps = modelDefaults(config.model);
+    return {
+      model: config.model,
+      baseUrl: config.baseUrl || 'https://api.openai.com/v1',
+      apiKey: config.apiKey,
+      source: 'environment',
+      // This rung has no test to learn from, so it keeps the field it has
+      // always sent rather than changing behaviour for existing setups.
+      tokenField: 'max_completion_tokens',
+      maxOutput: caps.maxOutput,
+      tools: caps.tools,
+      vision: caps.vision,
+    };
+  }
+  return undefined;
 }

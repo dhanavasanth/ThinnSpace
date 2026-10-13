@@ -4,6 +4,7 @@ import type { Dot, Memory, State, WorkspaceState } from '../shared/types';
 import { ConnectionsSection } from './ConnectionsSection';
 import { AvatarPicker } from './AvatarPicker';
 import { ModelsSection } from './composer/ModelsSection';
+import { useModelCatalog } from './composer/PromptInput';
 import {
   setThemePreference,
   themePreference,
@@ -64,6 +65,15 @@ export function WorkspaceDialog({
   const [avatar, setAvatar] = useState<string | null>(
     dialog.type === 'dot' ? (dialog.dot?.avatar ?? null) : null,
   );
+  /**
+   * This Dot's default model, as a ModelStore spec id. Without a control
+   * for it the server's "Dot default" rung was unreachable and every Dot
+   * fell to whatever connection happened to be oldest.
+   */
+  const [model, setModel] = useState<string | null>(
+    dialog.type === 'dot' ? (dialog.dot?.model ?? null) : null,
+  );
+  const { models } = useModelCatalog(dialog.type === 'dot');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [theme, setTheme] = useState(themePreference);
@@ -155,6 +165,7 @@ export function WorkspaceDialog({
                 learningContainerId: learningContainer.trim() || null,
                 skillDeliveryEnabled: skillDelivery,
                 avatar,
+                model,
               };
             }
             if (dialog.type === 'settings') {
@@ -273,6 +284,29 @@ export function WorkspaceDialog({
                     </option>
                   ))}
               </select>
+              <label className="field-label" htmlFor="dot-model">
+                Default model
+              </label>
+              <select
+                id="dot-model"
+                value={model ?? ''}
+                onChange={(event) => setModel(event.target.value || null)}
+              >
+                <option value="">
+                  {models.length
+                    ? 'First connected model'
+                    : 'No models connected yet'}
+                </option>
+                {models.map((spec) => (
+                  <option key={spec.id} value={spec.id}>
+                    {spec.label} · {spec.provider}
+                  </option>
+                ))}
+              </select>
+              <p className="muted small">
+                What this Dot answers with unless a conversation picks something
+                else. Connect endpoints under Settings.
+              </p>
             </fieldset>
           )}
           {(dialog.type === 'dot' || dialog.type === 'settings') && (

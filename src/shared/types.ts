@@ -90,6 +90,12 @@ export interface Dot {
   skillDeliveryEnabled?: boolean;
   /** Character id from shared/avatars; null picks a stable default. */
   avatar?: string | null;
+  /**
+   * This Dot's default model, as a ModelStore spec id
+   * (`<connectionId>:<model>`). Null falls back to the first enabled model,
+   * then to the legacy environment configuration.
+   */
+  model?: string | null;
 }
 export interface Conversation {
   id: string;
@@ -99,6 +105,11 @@ export interface Conversation {
   createdAt: number;
   /** Frozen at creation; null means this conversation does not participate. */
   learningContainerId?: string | null;
+  /**
+   * Overrides the Dot's model for this conversation only, as a ModelStore
+   * spec id (`<connectionId>:<model>`). Null follows the Dot.
+   */
+  model?: string | null;
 }
 export interface CallReceipt {
   anchorMessageId?: string | null;

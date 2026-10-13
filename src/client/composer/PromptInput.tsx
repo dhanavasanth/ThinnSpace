@@ -1,4 +1,11 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import {
   ArrowUp,
   AudioLines,
@@ -11,6 +18,7 @@ import {
   Plug,
   Plus,
   Square,
+  TriangleAlert,
   Upload,
   X,
 } from 'lucide-react';
@@ -21,6 +29,8 @@ import {
   modelDefaults,
   type ModelSpec,
 } from '../../shared/models';
+import type { ModelConnection } from '../../shared/providers';
+import { api } from '../api';
 import './prompt-input.css';
 
 /**
@@ -55,8 +65,18 @@ export interface PromptInputProps {
   disabled?: boolean;
   /** Models the owner has configured; empty until one is connected. */
   models: ModelSpec[];
-  modelId?: string;
-  onModelChange?: (id: string) => void;
+  /** An explicit choice for this conversation, if one was made. */
+  modelId?: string | null;
+  /** What this Dot falls back to, so the picker can say where it came from. */
+  dotModelId?: string | null;
+  /** `null` clears the choice and goes back to the Dot's own model. */
+  onModelChange?: (id: string | null) => void;
+  /** True while a choice is being saved. */
+  modelPending?: boolean;
+  /** Why the last choice did not stick. */
+  modelError?: string;
+  /** Connections the server could not reach, shown rather than hidden. */
+  modelIssues?: ModelIssue[];
   /** Opens wherever models are configured, when none exist yet. */
   onConnectModel?: () => void;
   /** Everything already in the conversation, for the context meter. */
@@ -127,6 +147,310 @@ function useDismiss(open: boolean, close: () => void) {
   return ref;
 }
 
+/* ---------- models ---------- */
+
+/** A connection the server could not reach. Shown, not hidden. */
+export interface ModelIssue {
+  /** Connection id, which is the prefix of every spec id it serves. */
+  id: string;
+  label: string;
+  error: string;
+}
+
+/** Spec ids are `<connectionId>:<model>`, so the prefix names the connection. */
+export function connectionOf(specId: string) {
+  return specId.split(':')[0];
+}
+
+export interface ModelGroup {
+  /** The connection these rows came from, which is what groups them. */
+  id: string;
+  /** The connection's own label, which is what `spec.provider` holds. */
+  label: string;
+  models: ModelSpec[];
+  /** Set when that connection last failed, so the group can say so. */
+  error?: string;
+}
+
+/**
+ * One group per connection, in the order the server listed them. Two
+ * endpoints can serve the same model name, so the connection is the only
+ * thing that tells those rows apart.
+ *
+ * Grouping is by connection id rather than label, because labels are not
+ * unique: a second Ollama connection added from the preset carries the
+ * same name as the first. Merging those would mark a working endpoint's
+ * models offline because an unrelated one that happens to share its name
+ * is failing, and would hide that the two rows come from different places.
+ */
+export function groupModels(
+  models: ModelSpec[],
+  issues: ModelIssue[] = [],
+): ModelGroup[] {
+  const groups: ModelGroup[] = [];
+  for (const model of models) {
+    const id = connectionOf(model.id);
+    const existing = groups.find((group) => group.id === id);
+    const group = existing ?? { id, label: model.provider, models: [] };
+    if (!existing) groups.push(group);
+    group.models.push(model);
+    const issue = issues.find((item) => item.id === id);
+    if (issue) group.error = issue.error;
+  }
+  return groups;
+}
+
+/** Where the model in use came from, which the picker says quietly. */
+export type ModelSource = 'chosen' | 'dot' | 'default' | 'orphan' | 'none';
+
+export const SOURCE_NOTE: Record<ModelSource, string> = {
+  chosen: '',
+  dot: 'Dot default',
+  default: 'Default',
+  orphan: 'Chosen model gone',
+  none: '',
+};
+
+/**
+ * Which model a message would actually use. An explicit choice wins; then
+ * the Dot's own default; then the first connected model, which is what the
+ * server falls back to. A choice that no longer exists is called out
+ * rather than silently replaced.
+ */
+export function activeModel(
+  models: ModelSpec[],
+  modelId?: string | null,
+  dotModelId?: string | null,
+): { spec?: ModelSpec; source: ModelSource } {
+  const chosen = modelId
+    ? models.find((item) => item.id === modelId)
+    : undefined;
+  if (chosen) return { spec: chosen, source: 'chosen' };
+  const fromDot = dotModelId
+    ? models.find((item) => item.id === dotModelId)
+    : undefined;
+  if (modelId) {
+    const spec = fromDot ?? models[0];
+    return { spec, source: spec ? 'orphan' : 'none' };
+  }
+  // The same loss, one rung down: deleting a connection a Dot pointed at
+  // leaves a dangling default. Something else will answer, and saying
+  // "Default" would hide that the Dot's own choice is gone.
+  if (dotModelId && !fromDot) {
+    const spec = models[0];
+    return { spec, source: spec ? 'orphan' : 'none' };
+  }
+  if (fromDot) return { spec: fromDot, source: 'dot' };
+  return models[0]
+    ? { spec: models[0], source: 'default' }
+    : { spec: undefined, source: 'none' };
+}
+
+/**
+ * The composer's view of what is connected: the enabled models, and any
+ * connection currently in error. Both come from endpoints the Settings
+ * panel already writes to, so this reloads rather than caching.
+ */
+export function useModelCatalog(enabled = true, version = 0) {
+  const [models, setModels] = useState<ModelSpec[]>([]);
+  const [issues, setIssues] = useState<ModelIssue[]>([]);
+  const reload = useCallback(() => {
+    if (!enabled) return;
+    void api<ModelSpec[]>('/models')
+      .then(setModels)
+      .catch(() => undefined);
+    void api<{ connections: ModelConnection[] }>('/model-connections')
+      .then(({ connections }) =>
+        setIssues(
+          connections
+            .filter((connection) => connection.error)
+            .map((connection) => ({
+              id: connection.id,
+              label: connection.label,
+              error: connection.error as string,
+            })),
+        ),
+      )
+      .catch(() => undefined);
+    // `version` is the caller's way of saying "something changed": the
+    // Settings panel writes to these same endpoints from outside this
+    // tree, and a composer that never refetched would keep offering to
+    // connect a model the owner has just connected.
+  }, [enabled, version]);
+  useEffect(reload, [reload]);
+  return { models, issues, reload };
+}
+
+/**
+ * The model list itself, split out so it can be rendered and checked on
+ * its own: it carries the only place that says what a model can do.
+ */
+export function ModelMenu({
+  models,
+  issues = [],
+  activeId,
+  dotModelId,
+  overridden,
+  error,
+  onPick,
+}: {
+  models: ModelSpec[];
+  issues?: ModelIssue[];
+  /** The model a message would use right now. */
+  activeId?: string;
+  dotModelId?: string | null;
+  /** True when an explicit choice is in force, which can be cleared. */
+  overridden?: boolean;
+  error?: string;
+  onPick: (id: string | null) => void;
+}) {
+  const groups = groupModels(models, issues);
+  const fallback = dotModelId
+    ? models.find((item) => item.id === dotModelId)
+    : undefined;
+  /**
+   * Two connections to the same provider share a preset label, so the name
+   * alone would label both groups identically. Where that happens the
+   * endpoint is what tells them apart, so it joins the heading.
+   */
+  const heading = (group: ModelGroup) =>
+    groups.some((other) => other.id !== group.id && other.label === group.label)
+      ? `${group.label} · ${group.models[0]?.baseUrl ?? ''}`
+      : group.label;
+  return (
+    <div className="prompt-menu wide" role="menu" aria-label="Model">
+      {groups.map((group) => (
+        <div
+          className="prompt-menu-group"
+          role="group"
+          aria-label={heading(group)}
+          key={group.id}
+        >
+          {groups.length > 1 && (
+            <p className="prompt-menu-label">
+              <span>{heading(group)}</span>
+              {group.error && (
+                <span className="prompt-cap warn" title={group.error}>
+                  Offline
+                </span>
+              )}
+            </p>
+          )}
+          {group.models.map((item) => {
+            // The server already resolved the capability table; the local
+            // fallback only matters for a payload that predates it.
+            const known = item.known ?? modelDefaults(item.model).known;
+            const on = item.id === activeId;
+            const offline = issues.some(
+              (issue) => issue.id === connectionOf(item.id),
+            );
+            return (
+              <button
+                type="button"
+                role="menuitemradio"
+                key={item.id}
+                aria-checked={on}
+                className={on ? 'on' : ''}
+                onClick={() => onPick(item.id)}
+              >
+                <span className="prompt-model-row">
+                  <strong>{item.label}</strong>
+                  <small>
+                    {item.provider} · {formatTokens(item.contextWindow)} context
+                  </small>
+                  <span className="prompt-model-caps">
+                    {item.vision && (
+                      <span className="prompt-cap" title="Can read images">
+                        Vision
+                      </span>
+                    )}
+                    {item.tools && (
+                      <span className="prompt-cap" title="Can call tools">
+                        Tools
+                      </span>
+                    )}
+                    {!known && (
+                      <span
+                        className="prompt-cap estimate"
+                        title="This model is not in the capability table, so its window and abilities are guesses."
+                      >
+                        Estimated
+                      </span>
+                    )}
+                    {item.missing && (
+                      <span
+                        className="prompt-cap warn"
+                        title="This connection no longer lists this model. Refresh it in Settings."
+                      >
+                        Not offered
+                      </span>
+                    )}
+                    {offline && (
+                      <span
+                        className="prompt-cap warn"
+                        title="This connection last failed. Test it in Settings."
+                      >
+                        Offline
+                      </span>
+                    )}
+                  </span>
+                </span>
+                {on && <Check size={14} aria-hidden="true" />}
+              </button>
+            );
+          })}
+        </div>
+      ))}
+
+      {overridden && (
+        <>
+          <div className="prompt-menu-rule" role="separator" />
+          <button
+            type="button"
+            role="menuitemradio"
+            aria-checked={false}
+            onClick={() => onPick(null)}
+          >
+            <span className="prompt-model-row">
+              <strong>Use the default</strong>
+              <small>
+                {fallback
+                  ? `Back to ${fallback.label}`
+                  : 'Back to whatever this Dot is set to'}
+              </small>
+            </span>
+          </button>
+        </>
+      )}
+
+      {issues.length > 0 && (
+        <>
+          <div className="prompt-menu-rule" role="separator" />
+          {issues.map((issue) => (
+            <p className="prompt-menu-issue" key={issue.id}>
+              <TriangleAlert size={13} aria-hidden="true" />
+              <span>
+                <strong>{issue.label}</strong>
+                <small>{issue.error}</small>
+              </span>
+            </p>
+          ))}
+        </>
+      )}
+
+      {error && (
+        <p className="prompt-menu-issue" role="alert">
+          <TriangleAlert size={13} aria-hidden="true" />
+          <span>
+            <strong>Not saved</strong>
+            <small>{error}</small>
+          </span>
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function PromptInput(props: PromptInputProps) {
   const {
     value,
@@ -137,7 +461,11 @@ export function PromptInput(props: PromptInputProps) {
     disabled,
     models,
     modelId,
+    dotModelId,
     onModelChange,
+    modelPending,
+    modelError,
+    modelIssues = [],
     onConnectModel,
     priorText = '',
     research,
@@ -165,7 +493,12 @@ export function PromptInput(props: PromptInputProps) {
 
   const trimmed = value.trim();
   const placeholder = usePlaceholder(!value && !focused);
-  const model = models.find((item) => item.id === modelId) ?? models[0];
+  const { spec: model, source: modelSource } = activeModel(
+    models,
+    modelId,
+    dotModelId,
+  );
+  const sourceNote = SOURCE_NOTE[modelSource];
 
   // Auto-grow. Reset to auto first so the box can shrink as well as grow.
   useLayoutEffect(() => {
@@ -364,12 +697,12 @@ export function PromptInput(props: PromptInputProps) {
             <button
               type="button"
               className={`prompt-model ${modelsOpen ? 'open' : ''}`}
-              aria-haspopup="listbox"
+              aria-haspopup="menu"
               aria-expanded={modelsOpen}
               title={
                 models.length === 0
-                  ? 'No model connected yet'
-                  : `Model: ${model?.label}`
+                  ? 'No model connected yet. Opens Settings.'
+                  : `Model: ${model?.label}${sourceNote ? ` · ${sourceNote}` : ''}`
               }
               onClick={() =>
                 models.length === 0
@@ -380,39 +713,30 @@ export function PromptInput(props: PromptInputProps) {
               <span className="prompt-model-name">
                 {model?.label ?? 'Connect a model'}
               </span>
-              <ChevronDown size={13} aria-hidden="true" />
+              {sourceNote && (
+                <span className="prompt-model-note">{sourceNote}</span>
+              )}
+              {modelPending ? (
+                <Loader2 size={13} className="spin" aria-hidden="true" />
+              ) : (
+                <ChevronDown size={13} aria-hidden="true" />
+              )}
             </button>
             {modelsOpen && models.length > 0 && (
-              <div className="prompt-menu wide" role="listbox">
-                {models.map((item) => {
-                  const caps = modelDefaults(item.model);
-                  return (
-                    <button
-                      type="button"
-                      role="option"
-                      key={item.id}
-                      aria-selected={item.id === model?.id}
-                      className={item.id === model?.id ? 'on' : ''}
-                      onClick={() => {
-                        onModelChange?.(item.id);
-                        setModelsOpen(false);
-                      }}
-                    >
-                      <span className="prompt-model-row">
-                        <strong>{item.label}</strong>
-                        <small>
-                          {item.provider} · {formatTokens(item.contextWindow)}{' '}
-                          context
-                          {caps.known ? '' : ' (estimated)'}
-                        </small>
-                      </span>
-                      {item.id === model?.id && (
-                        <Check size={14} aria-hidden="true" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+              <ModelMenu
+                models={models}
+                issues={modelIssues}
+                activeId={model?.id}
+                dotModelId={dotModelId}
+                overridden={
+                  modelSource === 'chosen' || modelSource === 'orphan'
+                }
+                error={modelError}
+                onPick={(id) => {
+                  onModelChange?.(id);
+                  setModelsOpen(false);
+                }}
+              />
             )}
           </div>
         </div>
@@ -476,6 +800,14 @@ export function PromptInput(props: PromptInputProps) {
           )}
         </div>
       </div>
+
+      {/* The menu closes on a choice, so a refusal has to say so out here. */}
+      {modelError && !modelsOpen && (
+        <p className="prompt-model-error" role="alert">
+          <TriangleAlert size={12} aria-hidden="true" />
+          <span>{modelError}</span>
+        </p>
+      )}
     </div>
   );
 }

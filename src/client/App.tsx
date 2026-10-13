@@ -44,8 +44,7 @@ import {
 import { BRAND } from '../shared/brand';
 import { Mascot } from './Mascot';
 import { Companion } from './companion/Companion';
-import { PromptInput } from './composer/PromptInput';
-import type { ModelSpec } from '../shared/models';
+import { PromptInput, useModelCatalog } from './composer/PromptInput';
 import { useCompanion } from './companion/useCompanion';
 import { Chat } from './Chat';
 import { ThreadList } from './ThreadList';
@@ -184,13 +183,22 @@ export function App() {
   const [pendingPrompt, setPendingPrompt] = useState<string>();
   const [startResearch, setStartResearch] = useState(false);
   const [startSource, setStartSource] = useState('');
-  const [models, setModels] = useState<ModelSpec[]>([]);
-  useEffect(() => {
-    if (!signedIn) return;
-    void api<ModelSpec[]>('/models')
-      .then(setModels)
-      .catch(() => undefined);
-  }, [signedIn]);
+  /**
+   * Bumped whenever the Settings panel may have changed what is
+   * connected. The panel is a sibling overlay that writes straight to the
+   * model endpoints, so nothing in this tree remounts when it closes;
+   * without this the composer would still say "Connect a model" after the
+   * owner connected one, and clicking that would reopen the same panel.
+   */
+  const [modelsVersion, setModelsVersion] = useState(0);
+  const {
+    models,
+    issues: modelIssues,
+    reload: reloadModels,
+  } = useModelCatalog(signedIn, modelsVersion);
+  // There is no conversation yet to hold a choice, so the first composer
+  // keeps it and the new conversation is pointed at it once it exists.
+  const [startModel, setStartModel] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState('');
   const [taskDetail, setTaskDetail] = useState<Detail>();
@@ -354,6 +362,20 @@ export function App() {
         dotId: dot.id,
         title: text?.slice(0, 80) || 'A new thought',
       });
+      if (startModel) {
+        await api(`/conversations/${next.id}/model`, 'PUT', {
+          model: startModel,
+        }).catch(() =>
+          setError(
+            'The conversation was created, but that model could not be selected.',
+          ),
+        );
+        // The choice belonged to this conversation. Keeping it would write
+        // the same override onto every later one — including after
+        // switching Dot, where nothing says an override is in force — and
+        // would re-send a spec the server just refused.
+        setStartModel(null);
+      }
       await refresh();
       setSelectedThread(next.id);
       setPendingPrompt(text);
@@ -862,6 +884,8 @@ export function App() {
                   onSchedule={() =>
                     setDialog({ type: 'schedule', threadId: thread.id })
                   }
+                  onSettings={() => setDialog({ type: 'settings' })}
+                  modelsVersion={modelsVersion}
                 />
               ) : (
                 <div className="new-conversation">
@@ -930,7 +954,11 @@ export function App() {
                     status={busy ? 'sending' : 'idle'}
                     disabled={!configured}
                     models={models}
-                    modelId={models[0]?.id}
+                    modelId={startModel}
+                    dotModelId={dot.model ?? null}
+                    onModelChange={setStartModel}
+                    modelIssues={modelIssues}
+                    onConnectModel={() => setDialog({ type: 'settings' })}
                     research={{
                       id: 'research',
                       label: 'Web research',
@@ -1186,7 +1214,14 @@ export function App() {
           dialog={dialog}
           state={state}
           workspace={workspace}
-          onClose={() => setDialog(undefined)}
+          onClose={() => {
+            const settings = dialog.type === 'settings';
+            setDialog(undefined);
+            if (settings) {
+              reloadModels();
+              setModelsVersion((count) => count + 1);
+            }
+          }}
           mutate={mutate}
         />
       )}

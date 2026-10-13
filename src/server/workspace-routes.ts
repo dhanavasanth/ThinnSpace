@@ -1,4 +1,5 @@
-import { PROVIDERS } from '../shared/providers.js';
+import { PROVIDERS, type ConnectionTest } from '../shared/providers.js';
+import { ConnectionTestError } from './model-store.js';
 import { setupInputSchema } from './setup-telemetry.js';
 import { isBuiltinAvatar } from '../shared/avatars.js';
 import { MAX_AVATAR_BYTES } from './avatar-store.js';
@@ -26,6 +27,14 @@ const dotSchema = z
     avatar: z.string().min(1).max(80).nullable().optional(),
   })
   .strict();
+/** A ModelStore spec id, `<connectionId>:<model>`. */
+const modelSpecSchema = z.string().trim().min(1).max(300);
+/** Updating a Dot may also set which model it uses by default. */
+const dotPatchSchema = dotSchema.extend({
+  model: modelSpecSchema.nullable().optional(),
+});
+const UNKNOWN_MODEL =
+  'That model is not available. Pick one you have enabled on a connection.';
 export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   const app = new Hono();
   app.route('/', pageRoutes(platform));
@@ -89,6 +98,55 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
           error: error instanceof Error ? error.message : 'Could not reach it.',
         },
         502,
+      );
+    }
+  });
+  /**
+   * Sends one real completion through a connection and reports what came
+   * back. This is the only proof a connection works: discovery shows a key
+   * can read a catalog, not that it can generate, and the chat path runs
+   * through Intelligence, so a connection cannot be exercised by chatting.
+   *
+   * A negative verdict answers 200 with `ok: false`, not an HTTP error. The
+   * test ran and reached a conclusion, and that conclusion carries the
+   * latency, the classified `kind` and the provider's own words — all of
+   * which an error status would throw away. It is also the shape already
+   * persisted as `connection.lastTest`, so the panel renders a fresh result
+   * and a remembered one through one path. HTTP errors stay for the test
+   * not running at all: an unknown connection, or an unreadable body.
+   */
+  app.post('/model-connections/:id/test', async (c) => {
+    const data = z
+      .object({ model: z.string().trim().min(1).max(200).optional() })
+      .strict()
+      // A body is optional: with no model named, the connection's first
+      // enabled one is tested.
+      .safeParse((await c.req.json().catch(() => ({}))) ?? {});
+    if (!data.success) return c.json({ error: 'Invalid model to test.' }, 400);
+    const id = c.req.param('id');
+    const connection = platform.workspace.models.get(id);
+    if (!connection) return c.json({ error: 'Connection not found.' }, 404);
+    const startedAt = Date.now();
+    try {
+      return c.json(await platform.workspace.models.test(id, data.data.model));
+    } catch (error) {
+      if (!(error instanceof ConnectionTestError)) throw error;
+      // A failed completion is already recorded with its real latency and
+      // kind; prefer that over re-describing it. Only a result from this
+      // call counts, so a precondition failure cannot resurface an older
+      // test as though it had just run.
+      const recorded = platform.workspace.models.get(id)?.lastTest;
+      return c.json(
+        recorded && !recorded.ok && recorded.at >= startedAt
+          ? recorded
+          : ({
+              ok: false,
+              model: data.data.model ?? connection.models[0] ?? '',
+              latencyMs: Date.now() - startedAt,
+              error: error.message,
+              kind: error.kind,
+              at: Date.now(),
+            } satisfies ConnectionTest),
       );
     }
   });
@@ -223,13 +281,15 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
     );
   });
   app.put('/dots/:id', async (c) => {
-    const data = dotSchema.safeParse(await c.req.json().catch(() => null));
+    const data = dotPatchSchema.safeParse(await c.req.json().catch(() => null));
     if (!data.success)
       return c.json({ error: 'Invalid specialist settings.' }, 400);
     const current = platform.workspace.dot(c.req.param('id'));
     if (!current) return c.json({ error: 'Dot not found.' }, 404);
     if (!validAvatar(data.data.avatar))
       return c.json({ error: 'Unknown avatar.' }, 400);
+    if (data.data.model && !platform.workspace.models.resolve(data.data.model))
+      return c.json({ error: UNKNOWN_MODEL }, 400);
     try {
       validateLearningSettings(
         data.data.learningContainerId === undefined
@@ -273,6 +333,44 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
   app.get('/conversations/:id/capture', (c) =>
     c.json(platform.workspace.capture(c.req.param('id'))),
   );
+  /** What answers here, and why: the override, the default, and the winner. */
+  app.get('/conversations/:id/model', (c) => {
+    const thread = platform.workspace.requireThread(c.req.param('id'));
+    const resolved = platform.modelFor(thread.dotId, thread.id);
+    return c.json({
+      override: thread.model ?? null,
+      dotDefault: platform.workspace.dot(thread.dotId)?.model ?? null,
+      // Deliberately without the key, which never leaves the server.
+      resolved: resolved
+        ? {
+            specId: resolved.specId ?? null,
+            model: resolved.model,
+            baseUrl: resolved.baseUrl,
+            source: resolved.source,
+          }
+        : null,
+    });
+  });
+  /** Points one conversation at a model; null follows the Dot again. */
+  app.put('/conversations/:id/model', async (c) => {
+    const data = z
+      .object({ model: modelSpecSchema.nullable() })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null));
+    if (!data.success)
+      return c.json(
+        { error: 'Provide a model to use, or null to follow the Dot.' },
+        400,
+      );
+    if (data.data.model && !platform.workspace.models.resolve(data.data.model))
+      return c.json({ error: UNKNOWN_MODEL }, 400);
+    return c.json(
+      platform.workspace.setConversationModel(
+        c.req.param('id'),
+        data.data.model,
+      ),
+    );
+  });
   app.post('/voice/calls', async (c) => {
     const data = z
       .object({ threadId: z.string(), sdp: z.string().max(100000) })
