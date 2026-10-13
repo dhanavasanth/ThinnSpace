@@ -2,6 +2,7 @@ import { ComputerStore } from './computer-store.js';
 import { ConnectionStore } from './connection-store.js';
 import { AvatarStore } from './avatar-store.js';
 import { FlowStore } from './flow-store.js';
+import { ModelStore } from './model-store.js';
 import { FlowRunStore } from './flow-run-store.js';
 import { Pages } from './pages.js';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,6 +18,7 @@ export class WorkspaceStore {
   readonly connections: ConnectionStore;
   readonly avatars: AvatarStore;
   readonly flows: FlowStore;
+  readonly models: ModelStore;
   readonly runs: FlowRunStore;
   constructor(
     path: string,
@@ -62,6 +64,7 @@ export class WorkspaceStore {
     this.connections = new ConnectionStore(this.db);
     this.avatars = new AvatarStore(this.db);
     this.flows = new FlowStore(this.db);
+    this.models = new ModelStore(this.db);
     this.runs = new FlowRunStore(this.db);
     this.pages = new Pages(this.db, (id) =>
       this.spaces().some((space) => space.id === id),

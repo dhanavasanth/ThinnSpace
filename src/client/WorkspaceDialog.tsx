@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import type { Dot, Memory, State, WorkspaceState } from '../shared/types';
 import { ConnectionsSection } from './ConnectionsSection';
 import { AvatarPicker } from './AvatarPicker';
+import { ModelsSection } from './composer/ModelsSection';
 import {
   setThemePreference,
   themePreference,
@@ -381,6 +382,7 @@ export function WorkspaceDialog({
               </p>
             </>
           )}
+          {dialog.type === 'settings' && <ModelsSection />}
           {dialog.type === 'settings' && (
             <fieldset className="appearance-fields">
               <legend>Appearance</legend>

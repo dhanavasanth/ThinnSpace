@@ -57,6 +57,8 @@ export interface PromptInputProps {
   models: ModelSpec[];
   modelId?: string;
   onModelChange?: (id: string) => void;
+  /** Opens wherever models are configured, when none exist yet. */
+  onConnectModel?: () => void;
   /** Everything already in the conversation, for the context meter. */
   priorText?: string;
   /** Public-web research, when this Dot is allowed it. */
@@ -136,6 +138,7 @@ export function PromptInput(props: PromptInputProps) {
     models,
     modelId,
     onModelChange,
+    onConnectModel,
     priorText = '',
     research,
     researchOn,
@@ -294,7 +297,6 @@ export function PromptInput(props: PromptInputProps) {
               aria-haspopup="menu"
               aria-expanded={actionsOpen}
               aria-label="Add to this message"
-              disabled={disabled}
               onClick={() => setActionsOpen(!actionsOpen)}
             >
               <Plus size={17} aria-hidden="true" />
@@ -364,16 +366,19 @@ export function PromptInput(props: PromptInputProps) {
               className={`prompt-model ${modelsOpen ? 'open' : ''}`}
               aria-haspopup="listbox"
               aria-expanded={modelsOpen}
-              disabled={disabled || models.length === 0}
               title={
                 models.length === 0
-                  ? 'Connect a model in Settings'
+                  ? 'No model connected yet'
                   : `Model: ${model?.label}`
               }
-              onClick={() => setModelsOpen(!modelsOpen)}
+              onClick={() =>
+                models.length === 0
+                  ? onConnectModel?.()
+                  : setModelsOpen(!modelsOpen)
+              }
             >
               <span className="prompt-model-name">
-                {model?.label ?? 'No model'}
+                {model?.label ?? 'Connect a model'}
               </span>
               <ChevronDown size={13} aria-hidden="true" />
             </button>

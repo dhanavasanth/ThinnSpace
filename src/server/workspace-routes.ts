@@ -1,4 +1,4 @@
-import { modelDefaults } from '../shared/models.js';
+import { PROVIDERS } from '../shared/providers.js';
 import { setupInputSchema } from './setup-telemetry.js';
 import { isBuiltinAvatar } from '../shared/avatars.js';
 import { MAX_AVATAR_BYTES } from './avatar-store.js';
@@ -47,32 +47,70 @@ export function workspaceRoutes(platform: Platform, voice: VoiceService) {
     platform.setupTelemetry.capture(event);
     return c.json({ ok: true });
   });
-  /**
-   * Models the owner can choose from. Today that is the one configured
-   * endpoint; once connections land this returns every enabled model
-   * across them. The shape is the same either way so the picker does not
-   * change when that happens.
-   */
-  app.get('/models', (c) => {
-    const configured = platform.config.model;
-    if (!configured) return c.json([]);
-    const caps = modelDefaults(configured);
-    return c.json([
-      {
-        id: configured,
-        model: configured,
-        label: configured,
-        provider: new URL(
-          platform.config.baseUrl ?? 'https://api.openai.com/v1',
-        ).hostname.replace(/^api\./, ''),
-        contextWindow: caps.contextWindow,
-        maxOutput: caps.maxOutput,
-        vision: caps.vision,
-        tools: caps.tools,
-        known: caps.known,
-      },
-    ]);
+  /** Models the owner can choose from, across every connection. */
+  app.get('/models', (c) => c.json(platform.workspace.models.specs()));
+  app.get('/model-connections', (c) =>
+    c.json({
+      providers: PROVIDERS,
+      connections: platform.workspace.models.list(),
+    }),
+  );
+  app.post('/model-connections', async (c) => {
+    const data = z
+      .object({
+        providerId: z.string().min(1),
+        label: z.string().max(60).default(''),
+        baseUrl: z.string().max(400).default(''),
+        apiKey: z.string().max(400).optional(),
+      })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null));
+    if (!data.success) return c.json({ error: 'Invalid connection.' }, 400);
+    try {
+      return c.json(platform.workspace.models.add(data.data), 201);
+    } catch (error) {
+      return c.json(
+        { error: error instanceof Error ? error.message : 'Invalid.' },
+        400,
+      );
+    }
   });
+  /** Asks the endpoint what it serves; a failure is reported, not thrown. */
+  app.post('/model-connections/:id/discover', async (c) => {
+    if (!platform.workspace.models.get(c.req.param('id')))
+      return c.json({ error: 'Connection not found.' }, 404);
+    try {
+      return c.json({
+        models: await platform.workspace.models.discover(c.req.param('id')),
+      });
+    } catch (error) {
+      return c.json(
+        {
+          error: error instanceof Error ? error.message : 'Could not reach it.',
+        },
+        502,
+      );
+    }
+  });
+  app.put('/model-connections/:id/models', async (c) => {
+    const data = z
+      .object({ models: z.array(z.string().min(1).max(200)).max(200) })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null));
+    if (!data.success) return c.json({ error: 'Invalid model list.' }, 400);
+    const next = platform.workspace.models.setModels(
+      c.req.param('id'),
+      data.data.models,
+    );
+    return next
+      ? c.json(next)
+      : c.json({ error: 'Connection not found.' }, 404);
+  });
+  app.delete('/model-connections/:id', (c) =>
+    platform.workspace.models.remove(c.req.param('id'))
+      ? c.json({ ok: true })
+      : c.json({ error: 'Connection not found.' }, 404),
+  );
   app.get('/workspace', (c) =>
     c.json({
       spaces: platform.workspace.spaces(),

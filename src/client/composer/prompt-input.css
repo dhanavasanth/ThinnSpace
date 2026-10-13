@@ -10,9 +10,9 @@
 .prompt-input {
   position: relative;
   border: 1px solid #e3e3e1;
-  border-radius: 24px;
+  border-radius: 22px;
   background: #ffffff;
-  padding: 12px 12px 8px;
+  padding: 14px 14px 10px;
   box-shadow:
     0 1px 2px #0808080a,
     0 8px 24px -12px #08080824;
@@ -26,9 +26,14 @@
     0 2px 8px #0808080f,
     0 16px 48px -12px #08080838;
 }
-.prompt-input.disabled {
-  opacity: 0.6;
-  pointer-events: none;
+/*
+ * An incomplete setup blocks sending, not exploring. The field and the
+ * send button say no; the actions menu and the model picker stay live so
+ * the owner can reach the thing that would fix it.
+ */
+.prompt-input.disabled .prompt-field textarea {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 /* Chips for anything folded into the next message. */
@@ -97,7 +102,9 @@
 /* The field. The placeholder is a sibling so it can fade independently. */
 .prompt-field {
   position: relative;
-  padding: 0 4px;
+  /* Two lines of room at rest, so the bar is a card and not a strip. */
+  min-height: 52px;
+  padding: 2px 4px 0;
 }
 .prompt-placeholder {
   position: absolute;
@@ -135,8 +142,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-top: 8px;
-  padding-top: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
   border-top: 1px solid #efefed;
 }
 .prompt-actions,
@@ -398,4 +405,103 @@
     transition: none !important;
     animation: none !important;
   }
+}
+
+/* Model connections, shown in Settings. */
+.models-section {
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid #e9e8e6;
+  border-radius: 12px;
+}
+.models-section .small {
+  font-size: 11px;
+}
+.model-connection {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid #efefed;
+  border-radius: 10px;
+}
+.model-connection-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.model-connection-head code {
+  font-size: 10px;
+  color: #a7a8af;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 190px;
+}
+.model-connection-head .grow {
+  flex: 1;
+}
+.model-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 9px;
+}
+.model-choices button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border: 1px solid #e6e6e4;
+  border-radius: 999px;
+  background: none;
+  color: #6b6b6b;
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease;
+}
+.model-choices button:hover {
+  border-color: #d6d6d3;
+  color: #333641;
+}
+.model-choices button.model-on {
+  border-color: #ff6a1f;
+  background: #fff1e8;
+  color: #c84a0a;
+}
+.model-add {
+  margin-top: 10px;
+  padding: 11px;
+  border: 1px solid #efefed;
+  border-radius: 10px;
+}
+.model-add-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 11px;
+}
+.model-add-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 7px 12px;
+  border: 1px dashed #d9d9d6;
+  border-radius: 10px;
+  background: none;
+  color: #6b6b6b;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    border-color 150ms ease,
+    color 150ms ease;
+}
+.model-add-open:hover {
+  border-color: #ff6a1f;
+  color: #c84a0a;
+}
+.models-section .spin {
+  animation: prompt-spin 900ms linear infinite;
 }
