@@ -81,12 +81,30 @@
   width: 100%;
   height: 100%;
 }
-/* Full-body art sets its own width so the silhouette stays honest. */
-.companion-figure img {
+/*
+ * Poses are stacked and crossfaded. The wrapper takes its size from the
+ * first layer in normal flow; the rest are absolute on top of it, so the
+ * box never changes size as the pose does.
+ */
+.companion-poses {
+  position: relative;
+  display: block;
+  height: var(--figure-height, 76px);
+}
+.companion-pose {
   display: block;
   height: var(--figure-height, 76px);
   width: auto;
   user-select: none;
+  opacity: 0;
+  transition: opacity 260ms ease;
+}
+.companion-pose:not(:first-child) {
+  position: absolute;
+  inset: 0;
+}
+.companion-pose.active {
+  opacity: 1;
 }
 .companion.has-character .companion-body {
   width: auto;
@@ -321,6 +339,7 @@
   .companion,
   .companion-body,
   .companion-figure,
+  .companion-pose,
   .companion-trail,
   .empty-chat-persona .mascot,
   .chat-persona .mascot,

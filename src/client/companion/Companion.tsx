@@ -1,6 +1,11 @@
 import { X } from 'lucide-react';
 import { Mascot } from '../Mascot';
-import { companionCharacter, companionSrc } from '../../shared/companions';
+import {
+  COMPANION_POSES,
+  companionCharacter,
+  poseForState,
+  poseSrc,
+} from '../../shared/companions';
 import type { Companion as CompanionModel } from './useCompanion';
 import './companion.css';
 
@@ -25,6 +30,7 @@ export function Companion({
   // Full-body art has a real silhouette; a bust would read as a tile, so a
   // Dot without a character stays small and keeps to the corner.
   const character = companionCharacter(dot?.avatar);
+  const pose = poseForState(state);
   return (
     <div
       className={`companion anchor-${anchor} is-${state} ${
@@ -49,12 +55,24 @@ export function Companion({
           aria-label={`${dot?.name ?? 'Your Dot'}: ${reason}`}
         >
           {character ? (
-            <img
-              src={companionSrc(character)}
-              alt=""
-              draggable={false}
-              decoding="async"
-            />
+            /*
+             * Every pose is mounted and crossfaded by opacity. Swapping one
+             * src would flash on first use and pop on every change; opacity
+             * on already-decoded layers stays on the compositor and glides.
+             */
+            <span className="companion-poses">
+              {COMPANION_POSES.map((name) => (
+                <img
+                  key={name}
+                  className={`companion-pose ${name === pose ? 'active' : ''}`}
+                  src={poseSrc(character, name)}
+                  alt=""
+                  draggable={false}
+                  decoding="async"
+                  loading="eager"
+                />
+              ))}
+            </span>
           ) : (
             <Mascot
               identity={dot?.id}
