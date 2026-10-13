@@ -45,6 +45,8 @@ import {
 } from './poll-notice';
 import { BRAND } from '../shared/brand';
 import { Mascot } from './Mascot';
+import { Companion } from './companion/Companion';
+import { useCompanion } from './companion/useCompanion';
 import { Chat } from './Chat';
 import { ThreadList } from './ThreadList';
 import { ResultPane } from './ResultPane';
@@ -302,6 +304,15 @@ export function App() {
   const dot =
     workspace?.dots.find((item) => item.id === selectedDot) ??
     workspace?.dots[0];
+  // Hooks must run before the unlock and loading returns below, so this
+  // reads optional state and tolerates the first renders having none.
+  const companion = useCompanion({
+    dot,
+    setup: workspace?.setup,
+    paused: state?.settings.paused,
+    pendingReviews,
+    running: !!state?.tasks.some((task) => task.status === 'running'),
+  });
   const thread = workspace?.conversations.find(
     (item) => item.id === selectedThread && item.dotId === dot?.id,
   );
@@ -1168,6 +1179,13 @@ export function App() {
           mutate={mutate}
         />
       )}
+      <Companion
+        companion={companion}
+        onClick={() => {
+          if (companion.state === 'guiding') setDialog({ type: 'settings' });
+          else if (companion.state === 'waiting') openReviews();
+        }}
+      />
     </div>
   );
   return configured ? (

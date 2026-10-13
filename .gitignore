@@ -21,3 +21,6 @@ data/
 
 # Scratch output from avatar generation; the shipped characters live in public/dots/
 avatar-sources/
+
+# Motion design concept renders; not shipped assets.
+motion-design/

@@ -1,0 +1,251 @@
+/*
+ * Companion motion.
+ *
+ * Two rules keep this smooth. First, only transform and opacity ever
+ * animate, so every frame stays on the compositor. Second, travel and
+ * performance live on different elements: `.companion` owns where the
+ * character is and transitions between anchors, `.companion-body` owns
+ * what it is doing and loops there. One element cannot both transition
+ * and animate the same property without stuttering.
+ */
+
+.companion {
+  position: fixed;
+  right: 26px;
+  bottom: 26px;
+  z-index: 40;
+  width: 76px;
+  height: 76px;
+  /* The layer is inert; only the character below opts back in. */
+  pointer-events: none;
+  transition: transform 620ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+.companion.anchor-rest {
+  transform: translate3d(0, 0, 0);
+}
+/* Settings sits at the bottom of the sidebar. */
+.companion.anchor-settings {
+  transform: translate3d(calc(-100vw + 300px), -2px, 0);
+}
+/* Reviews sits in the Flows section, higher up the same rail. */
+.companion.anchor-reviews {
+  transform: translate3d(calc(-100vw + 300px), -36vh, 0);
+}
+/* The composer runs along the bottom of the conversation column. */
+.companion.anchor-composer {
+  transform: translate3d(-120px, -18px, 0);
+}
+
+.companion-body {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  animation: companion-float 4.2s ease-in-out infinite;
+}
+.companion-figure {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  pointer-events: auto;
+  /* The silhouette glow reads the active Dot's own colour. */
+  filter: drop-shadow(0 0 10px var(--glow-soft))
+    drop-shadow(0 3px 14px var(--glow));
+  transition: filter 420ms ease;
+}
+.companion-figure .mascot {
+  width: 100%;
+  height: 100%;
+}
+.companion-figure:focus-visible {
+  outline: 2px solid var(--glow);
+  outline-offset: 4px;
+  border-radius: 50%;
+}
+
+/* The genie trail: a soft plume that only shows while travelling. */
+.companion-trail {
+  position: absolute;
+  left: 50%;
+  bottom: -6px;
+  width: 26px;
+  height: 34px;
+  margin-left: -13px;
+  border-radius: 50% 50% 40% 40%;
+  background: linear-gradient(to bottom, var(--glow), transparent 78%);
+  opacity: 0;
+  transform: scaleY(0.6);
+  transform-origin: top center;
+  transition:
+    opacity 320ms ease,
+    transform 320ms ease;
+}
+.companion:not(.anchor-rest) .companion-trail,
+.companion.is-working .companion-trail {
+  opacity: 0.5;
+  transform: scaleY(1);
+}
+
+.companion-dismiss {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid #e4e4e4;
+  border-radius: 50%;
+  background: #ffffff;
+  color: #8c8d97;
+  cursor: pointer;
+  pointer-events: auto;
+  opacity: 0;
+  transform: scale(0.8);
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
+.companion-body:hover .companion-dismiss,
+.companion-dismiss:focus-visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* States. Each swaps the loop on the body; the figure keeps its glow. */
+.companion.is-idle .companion-body {
+  animation: companion-float 4.2s ease-in-out infinite;
+}
+.companion.is-attentive .companion-body {
+  animation: companion-lean 2.4s ease-in-out infinite;
+}
+.companion.is-guiding .companion-body {
+  animation: companion-point 1.9s ease-in-out infinite;
+}
+.companion.is-working .companion-body {
+  animation: companion-work 1.15s ease-in-out infinite;
+}
+.companion.is-waiting .companion-body {
+  animation: companion-peek 2.6s ease-in-out infinite;
+}
+.companion.is-celebrating .companion-body {
+  animation: companion-cheer 700ms cubic-bezier(0.34, 1.56, 0.64, 1) infinite;
+}
+.companion.is-thinking .companion-body {
+  animation: companion-ponder 3.4s ease-in-out infinite;
+}
+/* Speech scales with the voice; a rig will drive a mouth here later. */
+.companion.is-speaking .companion-body {
+  animation: companion-speak 480ms ease-in-out infinite;
+}
+.companion.is-paused .companion-body {
+  animation: none;
+}
+.companion.is-paused .companion-figure {
+  filter: grayscale(0.75) drop-shadow(0 2px 8px #00000022);
+}
+
+/* Glow intensity follows how much attention the state deserves. */
+.companion.is-working .companion-figure,
+.companion.is-speaking .companion-figure {
+  filter: drop-shadow(0 0 16px var(--glow-soft))
+    drop-shadow(0 3px 22px var(--glow));
+}
+.companion.is-waiting .companion-figure,
+.companion.is-guiding .companion-figure {
+  animation: companion-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes companion-float {
+  50% {
+    transform: translateY(-7px);
+  }
+}
+@keyframes companion-lean {
+  50% {
+    transform: translate(-4px, -3px) rotate(-5deg) scale(1.04);
+  }
+}
+@keyframes companion-point {
+  40% {
+    transform: translate(-6px, 2px) rotate(-11deg);
+  }
+  70% {
+    transform: translate(-2px, -2px) rotate(-4deg);
+  }
+}
+@keyframes companion-work {
+  50% {
+    transform: translateY(-5px) rotate(3deg) scale(0.97, 1.03);
+  }
+}
+@keyframes companion-peek {
+  0%,
+  100% {
+    transform: translateX(-14px) rotate(-8deg);
+  }
+  50% {
+    transform: translateX(0) rotate(0deg);
+  }
+}
+@keyframes companion-cheer {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  40% {
+    transform: translateY(-14px) rotate(8deg) scale(1.08, 0.94);
+  }
+}
+@keyframes companion-ponder {
+  33% {
+    transform: translate(5px, -5px) rotate(6deg);
+  }
+  66% {
+    transform: translate(-5px, -2px) rotate(-6deg);
+  }
+}
+@keyframes companion-speak {
+  50% {
+    transform: scale(1.05, 0.96);
+  }
+}
+@keyframes companion-pulse {
+  50% {
+    filter: drop-shadow(0 0 20px var(--glow-soft))
+      drop-shadow(0 3px 26px var(--glow));
+  }
+}
+
+@media (max-width: 900px) {
+  .companion {
+    width: 58px;
+    height: 58px;
+    right: 14px;
+    bottom: 76px;
+  }
+  /* Travel across a narrow screen is noise; stay put and still react. */
+  .companion.anchor-settings,
+  .companion.anchor-reviews,
+  .companion.anchor-composer {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .companion,
+  .companion-body,
+  .companion-figure,
+  .companion-trail {
+    transition: none;
+    animation: none !important;
+  }
+  /* The glow still carries the state without any movement. */
+}
