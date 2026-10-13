@@ -1,15 +1,16 @@
 import { X } from 'lucide-react';
 import { Mascot } from '../Mascot';
+import { companionCharacter, companionSrc } from '../../shared/companions';
 import type { Companion as CompanionModel } from './useCompanion';
 import './companion.css';
 
 /**
- * The companion layer: the active Dot's own character, floating over the
- * app and reacting to things that actually happened.
+ * The companion layer: the active Dot's character, floating over the app
+ * and reacting to things that actually happened.
  *
  * It never covers content and never takes focus. The wrapper is
- * pointer-transparent and only the character itself is interactive, so a
- * click always reaches whatever sits underneath.
+ * pointer-transparent and only the figure itself opts back in, so a click
+ * always reaches whatever sits underneath.
  */
 export function Companion({
   companion,
@@ -21,13 +22,19 @@ export function Companion({
 }) {
   if (!companion.visible) return null;
   const { state, glow, dot, reason, anchor } = companion;
+  // Full-body art has a real silhouette; a bust would read as a tile, so a
+  // Dot without a character stays small and keeps to the corner.
+  const character = companionCharacter(dot?.avatar);
   return (
     <div
-      className={`companion anchor-${anchor} is-${state}`}
+      className={`companion anchor-${anchor} is-${state} ${
+        character ? 'has-character' : 'bust-only'
+      }`}
       style={
         {
           '--glow': glow.color,
           '--glow-soft': glow.soft,
+          '--figure-height': `${character?.height ?? 72}px`,
         } as React.CSSProperties
       }
       aria-live="polite"
@@ -37,16 +44,25 @@ export function Companion({
         <button
           type="button"
           className="companion-figure"
-          onClick={onClick}
+          onClick={onClick ?? companion.poke}
           title={reason}
           aria-label={`${dot?.name ?? 'Your Dot'}: ${reason}`}
         >
-          <Mascot
-            identity={dot?.id}
-            avatar={dot?.avatar}
-            name={dot?.name ?? 'Dot'}
-            decorative
-          />
+          {character ? (
+            <img
+              src={companionSrc(character)}
+              alt=""
+              draggable={false}
+              decoding="async"
+            />
+          ) : (
+            <Mascot
+              identity={dot?.id}
+              avatar={dot?.avatar}
+              name={dot?.name ?? 'Dot'}
+              decorative
+            />
+          )}
         </button>
         <button
           type="button"

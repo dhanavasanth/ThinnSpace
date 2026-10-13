@@ -14,8 +14,9 @@
   right: 26px;
   bottom: 26px;
   z-index: 40;
-  width: 76px;
-  height: 76px;
+  /* Width follows the art's own aspect; the box never defines the shape. */
+  width: auto;
+  height: var(--figure-height, 76px);
   /* The layer is inert; only the character below opts back in. */
   pointer-events: none;
   transition: transform 620ms cubic-bezier(0.22, 1, 0.36, 1);
@@ -24,13 +25,23 @@
 .companion.anchor-rest {
   transform: translate3d(0, 0, 0);
 }
-/* Settings sits at the bottom of the sidebar. */
-.companion.anchor-settings {
-  transform: translate3d(calc(-100vw + 300px), -2px, 0);
+/*
+ * Travel stays inside the content area. Leaning over the sidebar would
+ * cover the very navigation the companion is pointing at, so it stops at
+ * the left edge of the conversation and leans toward the rail instead.
+ * --content-left is the rail plus the sidebar.
+ */
+.companion {
+  --content-left: 300px;
 }
-/* Reviews sits in the Flows section, higher up the same rail. */
+.companion.anchor-settings {
+  transform: translate3d(calc(-100vw + var(--content-left) + 190px), -2px, 0);
+}
 .companion.anchor-reviews {
-  transform: translate3d(calc(-100vw + 300px), -36vh, 0);
+  transform: translate3d(calc(-100vw + var(--content-left) + 190px), -30vh, 0);
+}
+.template-app.nav-collapsed .companion {
+  --content-left: 80px;
 }
 /* The composer runs along the bottom of the conversation column. */
 .companion.anchor-composer {
@@ -48,11 +59,19 @@
   display: block;
   width: 100%;
   height: 100%;
-  padding: 0;
-  border: 0;
-  background: none;
   cursor: pointer;
   pointer-events: auto;
+  /*
+   * The app styles every button with a surface, and the dark theme adds a
+   * higher-specificity twin of that rule. Without forcing the reset the
+   * character sits on a dark panel and the glow traces that rectangle
+   * instead of the silhouette, which is the whole point of the cutout.
+   */
+  padding: 0 !important;
+  border: 0 !important;
+  background: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
   /* The silhouette glow reads the active Dot's own colour. */
   filter: drop-shadow(0 0 10px var(--glow-soft))
     drop-shadow(0 3px 14px var(--glow));
@@ -61,6 +80,16 @@
 .companion-figure .mascot {
   width: 100%;
   height: 100%;
+}
+/* Full-body art sets its own width so the silhouette stays honest. */
+.companion-figure img {
+  display: block;
+  height: var(--figure-height, 76px);
+  width: auto;
+  user-select: none;
+}
+.companion.has-character .companion-body {
+  width: auto;
 }
 .companion-figure:focus-visible {
   outline: 2px solid var(--glow);
@@ -163,6 +192,55 @@
   animation: companion-pulse 1.8s ease-in-out infinite;
 }
 
+.companion.is-waving .companion-body {
+  animation: companion-wave 620ms ease-in-out 3;
+}
+@keyframes companion-wave {
+  25% {
+    transform: translateY(-9px) rotate(-7deg);
+  }
+  60% {
+    transform: translateY(-4px) rotate(6deg);
+  }
+}
+
+/*
+ * The persona avatar at the top of a conversation breathes instead of
+ * sitting still, so the character has presence before anything happens.
+ * It lives here rather than in style.css to keep the companion's motion
+ * in one file.
+ */
+.empty-chat-persona .mascot,
+.chat-persona .mascot {
+  animation: companion-persona-float 4.6s ease-in-out infinite;
+  will-change: transform;
+}
+.persona-poke {
+  cursor: pointer;
+  /* Same reset: the persona avatar must not gain button chrome. */
+  padding: 0 !important;
+  border: 0 !important;
+  background: none !important;
+  box-shadow: none !important;
+  border-radius: 50% !important;
+  transition: transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.persona-poke:hover {
+  transform: scale(1.06);
+}
+.persona-poke:active {
+  transform: scale(0.95);
+}
+.persona-poke:focus-visible {
+  outline: 2px solid var(--accent, #ff6a1f);
+  outline-offset: 3px;
+}
+@keyframes companion-persona-float {
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
 @keyframes companion-float {
   50% {
     transform: translateY(-7px);
@@ -243,7 +321,10 @@
   .companion,
   .companion-body,
   .companion-figure,
-  .companion-trail {
+  .companion-trail,
+  .empty-chat-persona .mascot,
+  .chat-persona .mascot,
+  .persona-poke {
     transition: none;
     animation: none !important;
   }

@@ -17,10 +17,12 @@ export type CompanionState =
   | 'celebrating'
   | 'thinking'
   | 'speaking'
+  | 'waving'
   | 'paused';
 
 /** Highest priority first. The first match wins. */
 const ORDER: CompanionState[] = [
+  'waving',
   'speaking',
   'thinking',
   'celebrating',
@@ -56,6 +58,8 @@ export interface Companion {
   /** Where it should sit, so motion means "look here". */
   anchor: 'rest' | 'settings' | 'reviews' | 'composer';
   visible: boolean;
+  /** Say hello back when the owner pokes the character. */
+  poke: () => void;
   dismiss: () => void;
   restore: () => void;
 }
@@ -69,6 +73,7 @@ const REASONS: Record<CompanionState, string> = {
   celebrating: 'That run finished',
   thinking: 'Thinking',
   speaking: 'Speaking',
+  waving: 'Hello',
   paused: 'Everything is paused',
 };
 
@@ -79,8 +84,9 @@ const ANCHORS: Partial<Record<CompanionState, Companion['anchor']>> = {
 };
 
 const DISMISS_KEY = 'thinnspace-companion-hidden';
-/** How long the celebration shows before falling back. */
+/** How long a one-shot reaction shows before falling back. */
 const CELEBRATE_MS = 2600;
+const WAVE_MS = 1900;
 
 function readDismissed() {
   try {
@@ -93,7 +99,15 @@ function readDismissed() {
 export function useCompanion(signals: CompanionSignals): Companion {
   const [hidden, setHidden] = useState(readDismissed);
   const [celebrating, setCelebrating] = useState(false);
+  const [waving, setWaving] = useState(0);
   const wasRunning = useRef(false);
+
+  // A poke is a one-shot wave. Re-poking restarts it rather than stacking.
+  useEffect(() => {
+    if (!waving) return;
+    const timer = setTimeout(() => setWaving(0), WAVE_MS);
+    return () => clearTimeout(timer);
+  }, [waving]);
 
   // A run that just finished earns exactly one celebration, never a loop.
   useEffect(() => {
@@ -107,6 +121,7 @@ export function useCompanion(signals: CompanionSignals): Companion {
 
   const state = useMemo<CompanionState>(() => {
     const active: Partial<Record<CompanionState, boolean>> = {
+      waving: waving > 0,
       speaking: signals.voice === 'speaking',
       thinking: signals.voice === 'thinking',
       celebrating,
@@ -120,6 +135,7 @@ export function useCompanion(signals: CompanionSignals): Companion {
     };
     return ORDER.find((candidate) => active[candidate]) ?? 'idle';
   }, [
+    waving,
     celebrating,
     signals.paused,
     signals.pendingReviews,
@@ -136,6 +152,7 @@ export function useCompanion(signals: CompanionSignals): Companion {
     reason: REASONS[state],
     anchor: ANCHORS[state] ?? 'rest',
     visible: !hidden,
+    poke: () => setWaving((count) => count + 1),
     dismiss: () => {
       setHidden(true);
       try {

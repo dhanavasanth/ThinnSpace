@@ -858,12 +858,19 @@ export function App() {
               ) : (
                 <div className="new-conversation">
                   <div className="empty-chat-persona">
-                    <Mascot
-                      identity={dot.id}
-                      avatar={dot.avatar}
-                      name={dot.name}
-                      state={state.settings.paused ? 'paused' : 'idle'}
-                    />
+                    <button
+                      type="button"
+                      className="persona-poke"
+                      onClick={companion.poke}
+                      aria-label={`Say hello to ${dot.name}`}
+                    >
+                      <Mascot
+                        identity={dot.id}
+                        avatar={dot.avatar}
+                        name={dot.name}
+                        state={state.settings.paused ? 'paused' : 'idle'}
+                      />
+                    </button>
                     <h2>{dot.name}</h2>
                     <p>{dot.instructions}</p>
                     <button
